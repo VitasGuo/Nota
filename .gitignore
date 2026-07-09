@@ -1,0 +1,63 @@
+# Flutter/Dart
+.dart_tool/
+.flutter-plugins
+.flutter-plugins-dependencies
+.packages
+build/
+*.iml
+.idea/
+*.lock
+.trae/
+
+# Android
+android/.gradle/
+android/app/build/
+android/local.properties
+*.jks
+*.keystore
+
+# iOS
+ios/Pods/
+ios/.symlinks/
+ios/Flutter/Flutter.framework
+ios/Flutter/Flutter.podspec
+
+# macOS
+macos/Pods/
+macos/Flutter/ephemeral/
+
+# Platform-specific
+.android/
+.ios/
+.web/
+.linux/
+.windows/
+
+# IDE
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Build outputs
+*.apk
+*.aab
+*.ipa
+*.app
+
+# Secrets / credentials
+.env
+.env.*
+*.key
+*.pem
+*.keystore
+*.jks
+google-services.json
+GoogleService-Info.plist
+credentials.json
+*secrets*.json
+*api_key*.json
