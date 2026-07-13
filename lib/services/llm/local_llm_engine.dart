@@ -99,6 +99,7 @@ class LocalLlmEngine extends LlmEngine {
     void Function(String token)? onToken,
     required void Function(String fullText) onComplete,
     required void Function(String error) onError,
+    bool enableThinking = false,
   }) async {
     if (!_isReady || _config == null) {
       onError('本地 LLM 引擎未初始化');
@@ -106,7 +107,7 @@ class LocalLlmEngine extends LlmEngine {
     }
 
     try {
-      final prompt = _buildPrompt(systemPrompt, userPrompt);
+      final prompt = _buildPrompt(systemPrompt, userPrompt, enableThinking);
       final maxTokens = _config!.maxTokens;
 
       // 同步 FFI 调用放入事件队列，避免立即阻塞当前事件循环。
@@ -125,20 +126,29 @@ class LocalLlmEngine extends LlmEngine {
   }
 
   /// 按 [_chatTemplate] 构建 chat prompt。
-  String _buildPrompt(String system, String user) {
+  ///
+  /// [enableThinking] 为 false 时（默认），仅对 ChatML 模板（Qwen3 系列约定）
+  /// 在 user 内容末尾追加 `/no_think`，抑制 Qwen3 / ornith 等支持思考模式的
+  /// 模型的 `<think>` 输出，加速简单任务。Llama3 / generic 模板不支持该控制
+  /// token，追加会被当作普通文本干扰模型，故不追加。
+  String _buildPrompt(String system, String user, bool enableThinking) {
+    final supportsNoThink = _chatTemplate == ChatTemplateType.chatml;
+    final userContent = (!enableThinking && supportsNoThink)
+        ? '$user /no_think'
+        : user;
     switch (_chatTemplate) {
       case ChatTemplateType.chatml:
         return '<|im_start|>system\n$system<|im_end|>\n'
-            '<|im_start|>user\n$user<|im_end|>\n'
+            '<|im_start|>user\n$userContent<|im_end|>\n'
             '<|im_start|>assistant\n';
       case ChatTemplateType.llama3:
         return '<|begin_of_text|><|start_header_id|>system<|end_header_id|>\n\n'
             '$system<|eot_id|>'
             '<|start_header_id|>user<|end_header_id|>\n\n'
-            '$user<|eot_id|>'
+            '$userContent<|eot_id|>'
             '<|start_header_id|>assistant<|end_header_id|>\n\n';
       case ChatTemplateType.generic:
-        return 'System: $system\n\nUser: $user\n\nAssistant: ';
+        return 'System: $system\n\nUser: $userContent\n\nAssistant: ';
     }
   }
 

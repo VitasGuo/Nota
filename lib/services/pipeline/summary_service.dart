@@ -97,33 +97,30 @@ class SummaryService {
     String markdown = '';
     String? errorMsg;
 
-    try {
-      await engine.generate(
-        systemPrompt: _systemPrompt,
-        userPrompt: userPrompt,
-        onToken: (token) {
-          received.write(token);
-          onToken?.call(token);
-          // 进度：0.05 ~ 0.9 之间随累计字符数饱和上升，封顶 0.899
-          double ratio = received.length / expectedChars;
-          if (ratio > 0.999) ratio = 0.999;
-          final p = 0.05 + 0.85 * ratio;
-          if (p - lastReported >= 0.005) {
-            lastReported = p;
-            onProgress?.call(p);
-          }
-        },
-        onComplete: (fullText) {
-          markdown = fullText;
-        },
-        onError: (error) {
-          errorMsg = error;
-        },
-      );
-    } finally {
-      // 引擎由路由器按次新建，生成结束后释放其底层资源（HTTP 连接等）
-      await engine.dispose();
-    }
+    await engine.generate(
+      systemPrompt: _systemPrompt,
+      userPrompt: userPrompt,
+      enableThinking: true, // 纪要是复杂任务，开启思考模式提升质量
+      onToken: (token) {
+        received.write(token);
+        onToken?.call(token);
+        double ratio = received.length / expectedChars;
+        if (ratio > 0.999) ratio = 0.999;
+        final p = 0.05 + 0.85 * ratio;
+        if (p - lastReported >= 0.005) {
+          lastReported = p;
+          onProgress?.call(p);
+        }
+      },
+      onComplete: (fullText) {
+        // 过滤模型可能输出的 <think>...</think> 思考过程，
+        // 仅保留正文（部分云端模型在 enableThinking=true 时会输出思考内容）
+        markdown = _stripThinkTags(fullText);
+      },
+      onError: (error) {
+        errorMsg = error;
+      },
+    );
 
     if (errorMsg != null) {
       throw StateError('纪要生成失败：$errorMsg');
@@ -145,6 +142,25 @@ class SummaryService {
 
     onProgress?.call(1.0);
     return note.copyWith(id: id);
+  }
+
+  /// 过滤模型输出中的 `<think>...</think>` 思考过程标签。
+  ///
+  /// 部分云端模型（Qwen3 / DeepSeek R1）在 enableThinking=true 时会输出
+  /// `<think>思考内容</think>` 然后才是正文。纪要仅需保留正文。
+  /// 同时处理未闭合的 `<think>` 标签（流式截断场景）。
+  String _stripThinkTags(String text) {
+    // 移除完整的 <think>...</think> 块（含换行）
+    var result = text.replaceAll(
+      RegExp(r'<think>[\s\S]*?</think>', caseSensitive: false),
+      '',
+    );
+    // 移除未闭合的 <think>...</think>（流式截断或模型未输出闭合标签）
+    result = result.replaceAll(
+      RegExp(r'<think>[\s\S]*$', caseSensitive: false),
+      '',
+    );
+    return result.trim();
   }
 
   /// 拼接转写段落为完整文本。

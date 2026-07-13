@@ -34,12 +34,23 @@ jobs:
       - name: Build iOS (no codesign)
         run: flutter build ios --release --no-codesign
 
+      - name: Inspect build output
+        run: |
+          echo "=== build/ios/iphoneos/ ==="
+          ls -la build/ios/iphoneos/ || echo "DIR MISSING"
+          echo "=== Runner.app top level ==="
+          ls -la build/ios/iphoneos/Runner.app/ 2>/dev/null | head -30 || echo "Runner.app MISSING"
+          echo "=== Runner.app/Frameworks ==="
+          ls -la build/ios/iphoneos/Runner.app/Frameworks/ 2>/dev/null | head -20 || echo "No Frameworks dir"
+
       - name: Package IPA
         run: |
-          mkdir Payload
-          cp -r build/ios/iphoneos/Runner.app Payload/
+          mkdir -p Payload
+          cp -R build/ios/iphoneos/Runner.app Payload/
           zip -ry nota-ios.ipa Payload
           ls -lh nota-ios.ipa
+          echo "=== ipa contents ==="
+          unzip -l nota-ios.ipa | head -30
 
       - name: Upload IPA
         uses: actions/upload-artifact@v4
@@ -47,6 +58,13 @@ jobs:
           name: nota-ios-ipa
           path: nota-ios.ipa
           retention-days: 14
+
+      - name: Upload Runner.app (debug)
+        uses: actions/upload-artifact@v4
+        with:
+          name: runner-app-debug
+          path: build/ios/iphoneos/Runner.app
+          retention-days: 7
 
       - name: Upload build log on failure
         if: failure()

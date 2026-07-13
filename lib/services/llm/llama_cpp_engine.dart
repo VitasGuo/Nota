@@ -34,7 +34,10 @@ class LlamaCppEngine {
   Pointer<llama_sampler>? _sampler;
   Pointer<mtmd_context>? _mtmdCtx;
 
-  bool _backendInitialized = false;
+  /// llama.cpp backend 是进程级全局资源，多个 LlamaCppEngine 实例共享。
+  /// 用静态标志避免重复 init，dispose 时也不释放（仅 app 退出时由
+  /// [disposeBackend] 静态方法统一释放），防止一个实例 dispose 破坏其他实例。
+  static bool _backendInitialized = false;
   bool _isTextModelLoaded = false;
   bool _isAsrModelLoaded = false;
   bool _disposed = false;
@@ -71,6 +74,7 @@ class LlamaCppEngine {
     if (!_backendInitialized) {
       _ffi.llamaBackendInit();
       _backendInitialized = true;
+      _staticFfi = _ffi; // 记录供 disposeBackend 使用
     }
   }
 
@@ -404,14 +408,32 @@ class LlamaCppEngine {
     }
     _vocab = null;
 
-    if (_backendInitialized) {
-      _ffi.llamaBackendFree();
-      _backendInitialized = false;
-    }
+    // 注意：不在此处释放 backend。llama.cpp backend 是进程级全局资源，
+    // 多个 LlamaCppEngine 实例共享，单实例 dispose 释放会破坏其他实例。
+    // backend 释放由 [disposeBackend] 静态方法在 app 退出时统一调用。
 
     _isTextModelLoaded = false;
     _disposed = true;
   }
+
+  /// 释放进程级 llama.cpp backend（仅在 app 退出时调用）。
+  ///
+  /// 多个 LlamaCppEngine 实例共享同一 backend，单实例 [dispose] 不释放 backend，
+  /// 避免一个实例释放破坏其他仍在使用的实例。app 退出时调用此静态方法统一释放。
+  static void disposeBackend() {
+    if (_backendInitialized) {
+      // 用全局 FFI 绑定调用（_ffi 是实例字段，但 backend free 是全局操作，
+      // 任意一个未 dispose 的实例的 _ffi 都可调用）
+      // 这里通过创建临时实例拿不到 _ffi，故用顶层函数方式。
+      // 实际上 _ffi 是实例字段，但所有实例的 _ffi 指向同一份绑定，
+      // 这里借用任一实例调用即可。为简化，用静态字段记录上次使用的 ffi。
+      _staticFfi?.llamaBackendFree();
+      _backendInitialized = false;
+    }
+  }
+
+  /// 静态 FFI 引用，供 [disposeBackend] 使用（首次 init 时记录）。
+  static LlamaCppFfi? _staticFfi;
 
   // ========================================================================
   // 内部工具方法

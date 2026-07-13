@@ -80,7 +80,7 @@ class LlmModelManager {
     final dir = await getModelDir(modelId);
     final path = p.join(dir.path, info.file.filename);
     if (!File(path).existsSync()) return false;
-    return validateGgufFile(path);
+    return await validateGgufFile(path);
   }
 
   /// 返回已下载的预置模型清单。

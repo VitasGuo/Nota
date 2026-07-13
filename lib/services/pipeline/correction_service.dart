@@ -1,5 +1,3 @@
-import 'dart:async';
-
 import 'package:nota/models/transcript.dart';
 import 'package:nota/services/asr/hotword_dictionary.dart';
 import 'package:nota/services/llm/llm_engine.dart';
@@ -21,10 +19,18 @@ class CorrectionService {
   final TranscriptStorage _storage = TranscriptStorage();
 
   /// 纠错系统提示词。
+  ///
+  /// 工具型纠错任务要求输出与原文行行对应、字数接近、零发散：
+  /// - 仅修正明显识别错误（同音字/近音字/术语/人名），不改原意
+  /// - 保持原文行数与顺序（每行输入对应一行输出）
+  /// - 不增删字数、不重写句子、不解释、不输出前后缀
   static const String _systemPrompt =
-      '你是一个专业的语音转文字纠错助手。以下是一段语音转写文本，可能包含专有名词、人名、术语的识别错误。请参考提供的热词词表进行纠错。规则：'
-      '1) 只修正明显的识别错误，不改原意 2) 保持原文语言（中文转写保持中文，英文保持英文）'
-      '3) 只输出纠错后的文本，每行对应原文的一行，不加额外说明';
+      '你是专业的语音转文字纠错助手。任务：参考热词词表，修正转写文本中的识别错误。规则：\n'
+      '1) 只修正明显的识别错误（同音字/近音字/专有名词/术语/人名），不改原意\n'
+      '2) 保持原文语言（中文转写保持中文，英文保持英文）\n'
+      '3) 保持原文行数与顺序：每行输入严格对应一行输出，不增行不删行不合并\n'
+      '4) 不重写句子结构，不增删字数，不解释，不输出任何前后缀或说明\n'
+      '5) 只输出纠错后的纯文本，每行对应原文的一行';
 
   /// 纠错整个会话的转写文本。
   ///
@@ -56,25 +62,20 @@ class CorrectionService {
       throw StateError('纠错引擎未就绪（本地引擎尚未实现，请在设置中切换为云端引擎）');
     }
 
-    try {
-      final fullText =
-          await _generate(engine, _systemPrompt, userPrompt, onToken);
+    final fullText =
+        await _generate(engine, _systemPrompt, userPrompt, onToken);
 
-      // 解析 LLM 返回的纠错文本，按行序对应回写
-      final correctedLines = _parseCorrectedLines(fullText, segments.length);
-      for (var i = 0; i < segments.length && i < correctedLines.length; i++) {
-        final seg = segments[i];
-        final corrected = correctedLines[i];
-        await _storage.updateCorrectedText(seg.id!, corrected);
-        // 同步更新内存对象，供调用方直接使用
-        segments[i] = seg.copyWith(correctedText: corrected);
-      }
-
-      onProgress?.call(1.0);
-      return segments;
-    } finally {
-      await engine.dispose();
+    // 解析 LLM 返回的纠错文本，按行序对应回写
+    final correctedLines = _parseCorrectedLines(fullText, segments.length);
+    for (var i = 0; i < segments.length && i < correctedLines.length; i++) {
+      final seg = segments[i];
+      final corrected = correctedLines[i];
+      await _storage.updateCorrectedText(seg.id!, corrected);
+      segments[i] = seg.copyWith(correctedText: corrected);
     }
+
+    onProgress?.call(1.0);
+    return segments;
   }
 
   /// 纠错单段转写文本，返回纠错后的字符串。
@@ -92,14 +93,10 @@ class CorrectionService {
       throw StateError('纠错引擎未就绪（本地引擎尚未实现，请在设置中切换为云端引擎）');
     }
 
-    try {
-      final fullText =
-          await _generate(engine, _systemPrompt, userPrompt, onToken);
-      final lines = _parseCorrectedLines(fullText, 1);
-      return lines.isNotEmpty ? lines.first : segment.originalText;
-    } finally {
-      await engine.dispose();
-    }
+    final fullText =
+        await _generate(engine, _systemPrompt, userPrompt, onToken);
+    final lines = _parseCorrectedLines(fullText, 1);
+    return lines.isNotEmpty ? lines.first : segment.originalText;
   }
 
   /// 构建 user prompt。
@@ -124,27 +121,34 @@ class CorrectionService {
   }
 
   /// 调用引擎生成，将回调式 API 转为 Future。
+  ///
+  /// 统一为 `await engine.generate + 外部 result/error 变量` 模式，
+  /// 与 summary/note service 保持一致，避免 Completer 在未来引擎改为
+  /// "先返回再异步回调"时永不完成的风险。
   Future<String> _generate(
     LlmEngine engine,
     String systemPrompt,
     String userPrompt,
     void Function(String)? onToken,
-  ) {
-    final completer = Completer<String>();
-    engine.generate(
+  ) async {
+    String? result;
+    String? error;
+    await engine.generate(
       systemPrompt: systemPrompt,
       userPrompt: userPrompt,
+      enableThinking: false, // 纠错是简单任务，关闭思考模式
       onToken: onToken,
       onComplete: (fullText) {
-        if (!completer.isCompleted) completer.complete(fullText);
+        result = fullText;
       },
-      onError: (error) {
-        if (!completer.isCompleted) {
-          completer.completeError(Exception('LLM 纠错失败：$error'));
-        }
+      onError: (e) {
+        error = e;
       },
     );
-    return completer.future;
+    if (error != null) {
+      throw Exception('LLM 纠错失败：$error');
+    }
+    return result ?? '';
   }
 
   /// 解析 LLM 返回的纠错文本为行列表。

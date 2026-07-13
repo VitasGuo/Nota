@@ -1,12 +1,18 @@
+import 'dart:convert';
+
 import 'package:dio/dio.dart';
 import 'package:nota/services/llm/ai_providers.dart';
 import 'package:nota/services/llm/api_key_service.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 /// 连接测试与模型获取服务。
 ///
 /// 面向 OpenAI 兼容接口（`/models`、`/chat/completions`）。
 /// 对不支持 `/models` 的接口会回退到 `/chat/completions` 探活。
 class AiRouterService {
+  /// SharedPreferences key 前缀（持久化已获取的模型列表）。
+  static const String _modelsKeyPrefix = 'ai_router_models_';
+
   /// 拉取提供商可用模型列表。
   ///
   /// [customUrl] 覆盖默认地址（本地/自定义提供商需传入）。
@@ -74,7 +80,6 @@ class AiRouterService {
       final response = await dio.post(
         '/chat/completions',
         data: {
-          if (provider.defaultModel.isNotEmpty) 'model': provider.defaultModel,
           'messages': [
             {'role': 'user', 'content': 'hi'}
           ],
@@ -84,6 +89,28 @@ class AiRouterService {
       return response.statusCode == 200;
     } catch (_) {
       return false;
+    }
+  }
+
+  /// 持久化已获取的模型列表到 SharedPreferences。
+  static Future<void> saveFetchedModels(
+      String providerName, List<String> models) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString('$_modelsKeyPrefix$providerName', jsonEncode(models));
+  }
+
+  /// 读取已持久化的模型列表（测试连接时获取并保存的）。
+  ///
+  /// 用于 LLM 按功能配置中选择 LM Studio / 自定义接口的模型。
+  static Future<List<String>> getFetchedModels(String providerName) async {
+    final prefs = await SharedPreferences.getInstance();
+    final json = prefs.getString('$_modelsKeyPrefix$providerName');
+    if (json == null) return [];
+    try {
+      final list = jsonDecode(json) as List;
+      return list.cast<String>();
+    } catch (_) {
+      return [];
     }
   }
 

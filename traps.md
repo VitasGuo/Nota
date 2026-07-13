@@ -298,3 +298,58 @@
   - 调整引擎优先级：sherpa-onnx ASR（ONNX 运行时移动端成熟）优先于 GGUF ASR（llama.cpp 同步阻塞风险）。用户已下载 Paraformer 时优先使用，GGUF ASR 降为回退方案
   - 两个 `_processQueue` 增加 `if (seg.samples.length < 1600) continue;`（0.1s @ 16kHz），跳过过短音频段
   - 规律：移动端 FFI 同步调用 > 1s 有 ANR 风险，应放入 Isolate（但 llama.cpp 原生指针不跨 Isolate，需 per-isolate 加载模型，内存开销大）；务实方案是优先用更轻量的原生库（sherpa-onnx ONNX）替代重量级 FFI（llama.cpp GGUF），质量与稳定性权衡
+
+---
+
+## #38 AI Router 获取的模型列表需持久化供 LLM 按功能配置页选择
+- **现象**: AI Router 页面测试连接成功后能获取到 LM Studio/自定义接口的模型列表（显示为 Chip），但 LLM 按功能配置页选了这两个提供商后没有模型可选（下拉框为空），体验割裂。且 AI Router 的"模型名"输入框多余（测试连接已能自动获取模型）
+- **根因**: `AiConfigSelector` 的模型下拉只读 `provider.availableModels`（预设列表），LM Studio/自定义的 `availableModels` 为空 `[]`。AI Router 页面获取的 `fetchedModels` 仅存在内存 state（`_AiRouterState`），未持久化，LLM 配置页无法读取
+- **解决**:
+  - `AiRouterService` 新增 `saveFetchedModels`/`getFetchedModels`（SharedPreferences key: `ai_router_models_<provider>`），测试连接成功后持久化模型列表
+  - `AiConfigSelector` 改为 ConsumerStatefulWidget，模型数据源 = 预设 `availableModels` + `getFetchedModels`（去重合并）。合并后仍为空时显示文本输入框
+  - 删除 AI Router 页面的"模型名"输入框（`_modelController`/`_buildModelField`/`_saveModel`）
+  - `testConnection` 回退探活去掉 model 字段（LM Studio 用默认加载的模型）
+  - LM Studio `needsApiKey` 改 `false`（默认无鉴权）
+  - 规律：跨页面共享的动态数据（如 API 获取的模型列表）必须持久化，不能仅存于页面 state；UI 选择器应同时支持预设列表 + 动态获取 + 手动输入三种数据源
+
+---
+
+## #39 LlmTaskRouter.getEngine() 每次新建引擎不释放 — 内存泄漏 + 性能灾难
+- **现象**: 代码审查 C1 指出：`getEngine()` 每次调用都 `new CloudLlmEngine()` / `new LocalLlmEngine()` 并 `init()`，返回的引擎从不 dispose。本地引擎每次加载 GB 级 GGUF 模型，内存泄漏严重
+- **根因**: `llm_task_router.dart:68-79` 无缓存机制，每次 getEngine 都新建实例。调用方（如 `recording_screen._translateSegment`）用完不 dispose（也不应该 dispose，因为不知道是否还有其他调用方在用）
+- **解决**: 引擎实例按 taskType 缓存到 `_engineCache` Map。`getEngine` 先查缓存（`isReady` 时直接返回），未命中才新建。`setConfig` 时 dispose 旧引擎清除缓存。新增 `disposeAll()` 供 app 退出时调用。规律：重量级资源（模型加载、网络连接池）应按 key 缓存复用，配置变更时才重建
+
+---
+
+## #40 validateGgufFile 缺 await — 所有 GGUF 文件静默通过校验
+- **现象**: 代码审查 C3 指出：`isModelDownloaded` 中 `return validateGgufFile(path)` 缺 await，返回的是 Future 对象（truthy），导致所有存在的文件都通过校验，损坏或非 GGUF 文件被静默接受
+- **根因**: `llm_model_manager.dart:83` — `validateGgufFile` 返回 `Future<bool>`，但 `return validateGgufFile(path)` 没有 await，返回 Future 对象本身（永远是 truthy）而非 bool 结果
+- **解决**: 改为 `return await validateGgufFile(path);`。规律：async 函数中调用返回 Future 的方法必须 await 才能拿到实际返回值，否则返回的是 Future 对象本身
+
+---
+
+## #41 ornith/Qwen3 等模型默认 thinking 模式 — 简单任务（翻译）浪费大量 token
+- **现象**: 用户选 LM Studio 的 ornith-1.0-9b 做翻译，后台一直吐 token 但很慢。翻译这种简单任务不需要思考过程
+- **根因**: ornith-1.0-9b / Qwen3 等模型支持思考模式，默认生成 `<think>...</think>` 内容。LocalLlmEngine `_buildPrompt` 没有抑制 thinking，模型在翻译前先输出大段思考内容，浪费 token 和时间
+- **解决**: LlmEngine.generate 接口新增 `enableThinking` 参数（默认 false）。LocalLlmEngine `_buildPrompt` 在 `enableThinking=false` 时于 user 内容末尾追加 `/no_think`（Qwen3 系列约定的开关），抑制 `<think>` 输出。规律：支持思考模式的模型在简单任务（翻译/纠错/提取）中应显式关闭 thinking，仅复杂任务（纪要/整理）才开启
+
+---
+
+## #42 LlmTaskRouter.getEngine 并发竞态 — 重复加载 GB 级模型 OOM
+- **现象**: 代码审查 H1 指出，多个调用方并发调用 `getEngine(LlmTaskType.translation)` 时（如实时录音翻译 + UI 后台补译），会触发多次本地引擎 `new LocalLlmEngine() + init()`，重复加载 GGUF 模型（GB 级）导致内存爆炸 OOM
+- **根因**: `llm_task_router.dart` 的 `getEngine()` 仅缓存 `LlmEngine` 实例（`_engineCache[taskType]`），但未缓存创建中的 Future。当多个调用方在同一 taskType 的引擎尚未 init 完成时并发调用，缓存未命中（`cached == null || !cached.isReady`），每个调用方都启动一个新的 init 流程，最终多个引擎实例并存
+- **解决**: 引入 `Map<LlmTaskType, Future<LlmEngine?>> _pendingFutures` 缓存创建中的 Future。`getEngine` 流程改为：①查 `_engineCache` 命中且 `isReady` 直接返回；②缓存失效则 dispose+remove；③查 `_pendingFutures` 命中则复用同一 Future（await 同一 Future 自然去重）；④未命中才新建 Future（`_createAndCacheEngine`），存入 `_pendingFutures`，try 块 await 后 finally 移除。`disposeAll` 先 await 所有 pending Future 完成再 dispose 引擎。规律：重量级资源（模型加载、网络连接池）的异步初始化不仅要缓存实例，还要缓存"创建中的 Future"防止并发竞态重复加载
+
+---
+
+## #43 llamaBackendFree 全局影响 — 多实例 dispose 破坏其他实例
+- **现象**: 代码审查 M5 指出，多 LocalLlmEngine 实例并存时（如 translation + summary 两个 taskType 各持一个 LocalLlmEngine），其一 dispose 调用 `llamaBackendFree()` 会释放全局 backend，另一实例的后续推理崩溃（段错误/无效句柄）
+- **根因**: `llama_cpp_engine.dart` 的 `_backendInitialized` 是实例字段，但 llama.cpp 的 backend 是进程级单例（`llamaBackendInit` / `llamaBackendFree` 操作全局状态）。每个 LocalLlmEngine 实例独立追踪 `_backendInitialized`，A 实例 dispose 时调 `llamaBackendFree()` 释放全局 backend，B 实例仍持有指向已释放 backend 的 model/context 指针
+- **解决**: `_backendInitialized` 改为 `static` 字段（进程级追踪），新增 `static LlamaCppFfi? _staticFfi` 持有 FFI 引用。`_ensureBackend()` 检查静态字段，仅首次调用时 init。实例 `dispose()` 不再调 `llamaBackendFree()`（仅释放 model/context）。新增 `static void disposeBackend()` 供 app 退出时统一释放（`LlmTaskRouter.disposeAll` 末尾调 `LlamaCppEngine.disposeBackend()`）。规律：FFI 绑定的原生库若使用进程级全局状态（如 backend/scheduler），Dart 侧必须用 static 字段追踪，单实例 dispose 不能释放全局资源，应由 app 生命周期统一管理
+
+---
+
+## #44 云端模型 enableThinking=true 输出 `<think>` 标签污染纪要/笔记
+- **现象**: 代码审查 H2 指出，纪要/笔记任务开启 enableThinking=true 后，Qwen3/DeepSeek R1 等云端模型在 Markdown 正文前输出 `<think>思考过程...</think>` 内容，被 SummaryService/NoteService 当作纪要正文存入数据库，用户看到带思考标签的污染笔记
+- **根因**: v0.9.5 区分任务 thinking 策略（纪要/笔记整理=true，翻译/纠错=false），但 SummaryService/NoteService 的 `onComplete` 回调直接存储 LLM 完整输出，未过滤 `<think>` 标签。云端 OpenAI 兼容 API 的 `enable_thinking` 字段仅控制是否生成思考内容，无法消除已生成的标签
+- **解决**: SummaryService 和 NoteService 各新增 `_stripThinkTags(String) → String` 方法，过滤两种情况：①完整 `<think>...</think>` 标签（`RegExp(r'<think>[\s\S]*?</think>', caseSensitive: false)`）；②未闭合的 `<think>...` 尾部标签（`RegExp(r'<think>[\s\S]*$', caseSensitive: false)`，防止 LLM 中断时残留）。`onComplete(fullText)` 回调中 `markdown = _stripThinkTags(fullText)` 后再存库。NoteService 的两处 `_parseNoteOutput(output)` 调用也包一层 `_stripThinkTags`。规律：开启 thinking 模式的 LLM 任务，下游解析必须过滤 `<think>` 标签（完整 + 未闭合两种情况），不能假设 LLM 总是输出格式良好的闭合标签

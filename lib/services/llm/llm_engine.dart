@@ -122,6 +122,8 @@ abstract class LlmEngine {
   /// - [onToken] 流式 token 回调，每生成一个 token 触发一次（可选）。
   /// - [onComplete] 完成回调，返回完整文本。
   /// - [onError] 错误回调。
+  /// - [enableThinking] 是否启用思考模式（默认 false）。简单任务（翻译、
+  ///   纠错）应关闭以加速生成；复杂任务（纪要、笔记整理）可开启。
   ///
   /// 调用方应在 [onComplete] 或 [onError] 之一被触发后视为本次生成结束。
   Future<void> generate({
@@ -130,6 +132,7 @@ abstract class LlmEngine {
     void Function(String token)? onToken,
     required void Function(String fullText) onComplete,
     required void Function(String error) onError,
+    bool enableThinking = false,
   });
 
   /// 释放资源（模型句柄、网络连接等）。

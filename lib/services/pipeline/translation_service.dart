@@ -27,28 +27,52 @@ class TranslationService {
   static const Map<String, String> _langNames = {
     'zh': '中文',
     'en': '英文',
+    'ja': '日文',
+    'ko': '韩文',
+    'fr': '法文',
+    'de': '德文',
+    'es': '西班牙文',
+    'ru': '俄文',
   };
 
-  /// 检测文本源语言：包含大量中文字符则视为 zh，否则为 en。
+  /// 检测文本源语言：按字符 Unicode 范围统计占比，取最高者。
   ///
-  /// 判定阈值：中文字符占比 > 30% 视为中文。
+  /// 覆盖 8 种语言：中文 / 英文 / 日文 / 韩文 / 法德西俄用拉丁字母统一
+  /// 判为 'en'（西文中翻译方向通常一致，不细分）。默认 'en'。
   String _detectSourceLang(String text) {
     if (text.isEmpty) return 'en';
-    final chineseChars = RegExp(r'[\u4e00-\u9fa5]').allMatches(text).length;
-    final ratio = chineseChars / text.length;
-    return ratio > 0.3 ? 'zh' : 'en';
+    final cjk = RegExp(r'[\u4e00-\u9fa5]').allMatches(text).length;
+    final hiragana = RegExp(r'[\u3040-\u309f\u30a0-\u30ff]').allMatches(text).length;
+    final hangul = RegExp(r'[\uac00-\ud7af]').allMatches(text).length;
+    final cyrillic = RegExp(r'[\u0400-\u04ff]').allMatches(text).length;
+
+    // 优先级：日文（含假名）> 韩文 > 俄文 > 中文（汉字占比 > 30%）
+    // 中日韩文可能混用汉字，但假名/韩文独占字符是更强信号
+    if (hiragana > 0) return 'ja';
+    if (hangul > 0) return 'ko';
+    if (cyrillic > 0) return 'ru';
+    if (cjk / text.length > 0.3) return 'zh';
+    return 'en';
   }
 
   /// 获取语言中文名（未知代码原样返回）。
   String _langName(String code) => _langNames[code] ?? code;
 
   /// 构建 system prompt。
+  ///
+  /// 工具型翻译任务要求输出确定、忠实、零发散，prompt 显式约束：
+  /// - 仅输出译文正文，禁止解释/前后缀/思考过程
+  /// - 每行对应原文一行，保留段落结构
+  /// - 数字/专有名词/术语参考热词词表保持一致
   String _buildSystemPrompt(String sourceLang, String targetLang) {
-    return '你是一个专业翻译。将用户提供的文本从${_langName(sourceLang)}翻译为${_langName(targetLang)}。'
-        '规则：1) 保持专有名词/术语不变（参考热词词表）'
-        '2) 保持原文语气和语义 '
-        '3) 只输出翻译结果，不加解释 '
-        '4) 每行对应原文的一行';
+    return '你是专业翻译。任务：将用户提供的文本从${_langName(sourceLang)}翻译为${_langName(targetLang)}。\n'
+        '规则：\n'
+        '1) 保持专有名词/术语不变（参考热词词表）\n'
+        '2) 保持原文语气和语义\n'
+        '3) 只输出翻译结果正文，不加解释、注释、引号或任何前后缀\n'
+        '4) 每行对应原文的一行，保留段落结构\n'
+        '5) 数字、人名、代码、URL 保持原样不翻译\n'
+        '6) 忠于原文，不增删信息，不意译发挥';
   }
 
   /// 构建 user prompt（含热词参考）。
@@ -68,9 +92,8 @@ class TranslationService {
 
   /// 调用 LLM 引擎生成翻译，将回调式 API 封装为 Future。
   ///
-  /// 从 [LlmTaskRouter] 获取 translation 任务的引擎（可能为 null，
-  /// 本地引擎未实现时返回 null），流式接收 token 并在完成后返回完整译文。
-  /// 使用后释放引擎资源。
+  /// 从 [LlmTaskRouter] 获取 translation 任务的引擎（按 taskType 缓存，
+  /// 不在此处 dispose）。流式接收 token 并在完成后返回完整译文。
   Future<String> _generateTranslation({
     required String systemPrompt,
     required String userPrompt,
@@ -83,28 +106,25 @@ class TranslationService {
 
     final completer = Completer<String>();
 
-    try {
-      await engine.generate(
-        systemPrompt: systemPrompt,
-        userPrompt: userPrompt,
-        onToken: (token) {
-          onToken?.call(token);
-        },
-        onComplete: (fullText) {
-          if (!completer.isCompleted) completer.complete(fullText);
-        },
-        onError: (error) {
-          if (!completer.isCompleted) {
-            completer.completeError(Exception('翻译生成失败：$error'));
-          }
-        },
-      );
+    await engine.generate(
+      systemPrompt: systemPrompt,
+      userPrompt: userPrompt,
+      enableThinking: false, // 翻译是简单任务，关闭思考模式加速生成
+      onToken: (token) {
+        onToken?.call(token);
+      },
+      onComplete: (fullText) {
+        if (!completer.isCompleted) completer.complete(fullText);
+      },
+      onError: (error) {
+        if (!completer.isCompleted) {
+          completer.completeError(Exception('翻译生成失败：$error'));
+        }
+      },
+    );
 
-      final result = await completer.future;
-      return result.trim();
-    } finally {
-      await engine.dispose();
-    }
+    final result = await completer.future;
+    return result.trim();
   }
 
   /// 翻译整个会话的所有 segments。

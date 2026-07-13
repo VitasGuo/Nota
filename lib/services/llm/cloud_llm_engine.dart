@@ -55,6 +55,7 @@ class CloudLlmEngine extends LlmEngine {
     void Function(String token)? onToken,
     required void Function(String fullText) onComplete,
     required void Function(String error) onError,
+    bool enableThinking = false,
   }) async {
     final config = _config;
     if (!_isReady || config == null) {
@@ -104,6 +105,11 @@ class CloudLlmEngine extends LlmEngine {
         'stream': true,
         'max_tokens': config.maxTokens,
         'temperature': config.temperature,
+        // 思考模式控制：Qwen3 DashScope / DeepSeek R1 等 OpenAI 兼容 API
+        // 通过 enable_thinking 字段控制；不支持的 provider 会忽略此字段。
+        // enableThinking=false 时禁止模型输出 <think>...</think> 思考过程，
+        // 加速简单任务（翻译/纠错）并避免思考内容污染输出。
+        'enable_thinking': enableThinking,
       };
 
       // 以流式响应接收 SSE

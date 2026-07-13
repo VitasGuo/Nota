@@ -1,7 +1,7 @@
 name: nota
 description: "NOTA - Note with ASR, 私人AI笔记软件"
 publish_to: 'none'
-version: 0.8.2+1
+version: 0.9.5+1
 
 environment:
   sdk: ^3.11.0

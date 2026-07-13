@@ -79,4 +79,12 @@ class SpeakerRecorder {
       _currentPath = null;
     }
   }
+
+  /// 释放资源（接口对称性占位）。
+  ///
+  /// SpeakerRecorder 基于 MethodChannel + Android 原生 AudioRecord，
+  /// stop/cancel 已释放原生录音器，MethodChannel 本身无 Dart 侧资源需 dispose。
+  /// 保留空实现供 DualTrackRecorder.dispose 对称调用，未来若增加原生资源
+  /// 可在此扩展。
+  Future<void> dispose() async {}
 }

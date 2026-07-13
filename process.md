@@ -3,9 +3,97 @@
 ## 项目目标
 NOTA - Note with ASR，私人 AI 笔记软件。基于 Flutter，集成 ai_router_module 统一管理多 AI 平台，聚焦"录音 → 转写 → 笔记"场景。派生自 xiaop v1.4.1（AI 情感陪伴助手），继承其多 AI 提供商、主题等基础设施，后续将向笔记 + 语音识别（ASR）方向演进。
 
-## 当前版本: v0.8.1
+## 当前版本: v0.9.5
 
 ## 版本历史
+
+### v0.9.5 (2026-07-14) - LLM 任务差异化配置 + 全代码审查修复
+- **目标**：工具型应用按任务差异化配置 LLM 温度/maxTokens/thinking，优化 prompt 防发散；全代码审查修复 11 个真问题
+- **LLM 任务差异化配置**（`llm_task_router.dart`）
+  - `_defaultConfig` 按 LlmTaskType 区分：translation=0.1/1024（简单任务低温度短输出）、correction=0.1/4096（低温度保留原文长度）、summary/noteOrganize=0.4/4096（中温度允许归纳）
+  - 原 4 个任务统一 0.3/4096 无法适配工具型应用"翻译求稳、纪要求归纳"的差异
+- **Prompt 强化约束**（`recording_screen.dart` + `translation_service.dart` + `correction_service.dart`）
+  - 实时翻译 prompt 加 5 条严格规则：只输出译文正文/保留段落结构/数字专名代码 URL 保留/忠于原文不增删/流畅自然
+  - 批量翻译 prompt（TranslationService）同步加规则 + 每条规则 \n 分隔（原拼接成一行 LLM 难解析）
+  - 纠错 prompt 加"保持原文行数与顺序、不增删字数、不重写句子"约束
+  - translation_service 源语言检测从 zh/en 扩展到 8 种（ja/ko/ru/zh/en），与 recording_screen 的 _targetLanguages 对齐
+- **全代码审查修复 11 个真问题**（2 份并行子代理审查报告）
+  - **H1 getEngine 并发竞态**（`llm_task_router.dart`）：多个调用方并发 getEngine 同一 taskType 时无去重，本地引擎会重复加载 GB 级模型 OOM → 加 `_pendingFutures` Map 缓存创建中 Future，复用同一 Future 去重
+  - **H2 `<think>` 标签过滤缺失**（`summary_service.dart` + `note_service.dart`）：enableThinking=true 时云端模型输出 `<think>...</think>` 思考内容污染纪要/笔记 → 加 `_stripThinkTags` 过滤完整与未闭合标签
+  - **H3 CloudLlmEngine 忽略 enableThinking**（`cloud_llm_engine.dart`）：请求体无思考控制字段 → 加 `enable_thinking` 字段（Qwen3 DashScope/DeepSeek R1 等 OpenAI 兼容 API 支持，不支持的 provider 忽略）
+  - **M3 `/no_think` 对非 ChatML 模板干扰**（`local_llm_engine.dart`）：Llama3/generic 模板不支持 Qwen3 控制 token，追加会被当普通文本 → 仅对 ChatTemplateType.chatml 追加 `/no_think`
+  - **M5 llamaBackendFree 全局影响**（`llama_cpp_engine.dart`）：多 LocalLlmEngine 实例时其一 dispose 调 llamaBackendFree 破坏其他实例 → `_backendInitialized` 改静态字段，dispose 不释放 backend，新增静态 `disposeBackend()` 供 app 退出统一释放
+  - **H1 disposeAll 从未调用**（`main.dart`）：LlmTaskRouter.disposeAll 定义但无调用点，GB 级模型热重启累积 → NotaApp.dispose + didChangeAppLifecycleState(detached) 双保险 fire-and-forget 调用
+  - **H2 _cancelRecording 未 await stop**（`recording_screen.dart`）：`_asrEngine?.stop()` 未 await，删除 session 时 ASR 仍可能在写孤儿段落 → 改 `await _asrEngine?.stop()`
+  - **M1 TextEditingController 未 dispose**（`transcript_screen.dart`）：_editSpeakerLabel 的 controller 在 showDialog 后未 dispose → try/finally 包裹 dispose
+  - **M2 DualTrackRecorder.dispose 漏 speakerRecorder**（`dual_track_recorder.dart` + `speaker_recorder.dart`）：仅 dispose micRecorder → SpeakerRecorder 补空 dispose 占位，DualTrackRecorder 调用
+  - **M3 AsrModelManager 无 dispose**（`asr_model_manager.dart`）：Dio 实例未 close → 补 `dispose() { _dio.close(); }`
+  - **M4/M5 unawaited 标注缺失**（`recording_screen.dart`）：insertSegment/updateTranslation/_translateSegment fire-and-forget 未 unawaited → 4 处加 `unawaited(...)`
+  - **L1 correction_service._generate 模式不一致**（`correction_service.dart`）：用 Completer 未 await engine.generate（C5 旧模式残留）→ 改为 `await + 外部 result/error 变量` 模式，与 summary/note 一致；移除冗余 `dart:async` import
+- **验证**：`flutter analyze`（14 文件）→ No issues found!；`flutter build apk --release` → 成功（108.3s，135.6MB）；版本号 0.9.4+1 → 0.9.5+1
+
+### v0.9.4 (2026-07-14) - ASR 引擎下拉框溢出修复 + 翻译关闭 thinking 模式
+- **目标**：修复本地 ASR 引擎下拉框文字溢出 + 翻译任务关闭 thinking 模式加速生成
+- **ASR 引擎下拉框溢出修复**（`settings_screen.dart`）
+  - DropdownButtonFormField 加 `isExpanded: true` + `helperMaxLines: 2`
+  - DropdownMenuItem 文字缩短为"sherpa-onnx（稳定）"/"GGUF ASR（质量优）"，加 `overflow: TextOverflow.ellipsis`
+- **翻译关闭 thinking 模式**（`llm_engine.dart` + `local_llm_engine.dart` + `cloud_llm_engine.dart`）
+  - 根因：ornith-1.0-9b 等支持思考模式的模型默认生成 `<think>` 内容，翻译等简单任务浪费大量 token
+  - LlmEngine.generate 接口新增 `enableThinking` 参数（默认 false）
+  - LocalLlmEngine `_buildPrompt` 在 `enableThinking=false` 时于 user 内容末尾追加 `/no_think`，抑制 `<think>` 输出
+  - CloudLlmEngine 同步加参数保持接口一致（云端不处理，透传）
+  - 所有现有调用方（翻译/纠错/纪要/笔记整理）均使用默认值 false，即默认关闭 thinking
+- **验证**：`flutter analyze`（5 文件）→ No issues found!；`flutter build apk --debug` → 成功（41.4s）；版本号 0.9.3+1 → 0.9.4+1
+
+### v0.9.3 (2026-07-14) - 翻译互译模式 + 录音中可切换翻译
+- **目标**：新增中英互译模式（自动检测原文语言双向翻译）+ 允许录音中随时开关翻译
+- **互译模式**（`recording_screen.dart`）
+  - 目标语言列表首位新增"自动（中英互译）"选项
+  - 新增 `_buildTranslationPrompt` 方法：互译模式 prompt 让 LLM 检测原文是中文翻译为英语、是英语翻译为中文，其他语言保持原文；普通模式 prompt 不变
+- **录音中可切换翻译**（`recording_screen.dart`）
+  - 去掉 Switch 的 `onChanged: _isRecording ? null` 限制，录音中也可开关翻译
+  - 录音中开启翻译时自动补译已有但未翻译的段落（遍历 `_segments`，对 `_partialTranslations[i] == null` 的段落调用 `_translateSegment`）
+  - 去掉 DropdownButton 的录音中禁用限制，录音中也可切换目标语言
+- **验证**：`flutter analyze` → No issues found!；`flutter build apk --debug` → 成功（13.1s）；版本号 0.9.2+1 → 0.9.3+1
+
+### v0.9.2 (2026-07-14) - 录音界面翻译目标语言选择
+- **目标**：录音界面翻译按钮旁加目标语言下拉框，让用户选择翻译到哪种语言
+- **改动**（`recording_screen.dart`）
+  - 新增 `_translationTargetLang` 状态字段（默认"中文"），持久化到 SharedPreferences key `translation_target_lang`
+  - initState 加载持久化的目标语言
+  - `_translateSegment` 的 systemPrompt 改用动态 `_translationTargetLang`（原硬编码"中文"）
+  - 翻译开关 UI 下方原"翻译"文字替换为目标语言下拉框（DropdownButton），支持中文/英语/日语/韩语/法语/德语/西班牙语/俄语 8 种语言
+  - 录音中禁止切换语言（`onChanged: _isRecording ? null`），避免中途切换导致译文不一致
+  - 翻译开启时语言文字高亮 primary 色，关闭时灰色
+- **验证**：`flutter analyze` → No issues found!；`flutter build apk --debug` → 成功（20.0s）；版本号 0.9.1+1 → 0.9.2+1
+
+### v0.9.1 (2026-07-14) - ASR 引擎选择 UI + 代码审查修复
+- **目标**：解决 Qwen ASR 闪退问题（用户可选择引擎避免自动选 GGUF 闪退）+ 修复代码审查报告中的真问题
+- **ASR 引擎选择 UI**（`settings_screen.dart` + `recording_screen.dart`）
+  - 设置页 ASR 配置区新增"本地 ASR 引擎"下拉选择：sherpa-onnx（默认稳定）/ GGUF ASR（Qwen3-ASR 质量优）。SharedPreferences key: `asr_local_engine_pref`
+  - recording_screen `_initAsrEngine` 改为读取用户偏好决定引擎顺序，偏好引擎模型未下载时自动回退另一种引擎
+  - 解决"下载 Qwen 0.6B 后仍用 Paraformer"问题：用户需在设置页手动选 GGUF ASR 才会优先使用
+  - 解决"Qwen ASR 闪退"问题：默认 sherpa-onnx 避免同步 FFI 阻塞闪退
+- **代码审查修复**（3 个真问题）
+  - **C1 修复**（`llm_task_router.dart`）：`getEngine()` 每次新建引擎不释放 → 改为按 taskType 缓存引擎实例，`setConfig` 时 dispose 旧引擎清除缓存，新增 `disposeAll()` 供 app 退出时调用
+  - **C3 修复**（`llm_model_manager.dart:83`）：`return validateGgufFile(path)` 缺 await → `return await validateGgufFile(path)`，此前所有文件都跳过 GGUF magic 校验
+  - **H11 假阳性**（`hotword_screen.dart:737`）：审查说 `initialValue` 不存在应改 `value`，但实际 Flutter 3.33+ 中 `value` 已废弃，`initialValue` 才是正确参数。保持原代码不改
+- **LM Studio needsApiKey 改回 true**（`ai_providers.dart`）：v0.9.0 误改为 false，LM Studio 支持配置 API Key 鉴权
+- **验证**：`flutter analyze`（6 文件）→ 0 issues；`flutter build apk --debug` → 成功（42.9s）；版本号 0.9.0+1 → 0.9.1+1
+
+### v0.9.0 (2026-07-10) - AI Router 模型选择优化 + 恢复 GGUF ASR 优先级
+- **目标**：解决 AI Router 中 LM Studio/自定义接口模型名输入框多余、LLM 按功能配置选这两个提供商后无法选模型体验割裂的问题；恢复 GGUF ASR 优先级（用户下载了 Qwen3-ASR 0.6B 期望优先使用）
+- **问题 1：AI Router 模型选择优化**
+  - **删 Model 输入框**（`ai_router_screen.dart`）：LM Studio/自定义接口的"模型名"输入框删除，因测试连接时自动获取模型列表。移除 `_modelController`/`_saveModel`/`_buildModelField`/`_modelKey` 相关代码
+  - **持久化 fetchedModels**（`ai_router_service.dart`）：新增 `saveFetchedModels`/`getFetchedModels` 方法，测试连接成功后把获取到的模型列表持久化到 SharedPreferences（key: `ai_router_models_<provider>`），供 LLM 按功能配置页读取
+  - **AiConfigSelector 改造**（`ai_config_selector.dart`）：从 ConsumerWidget 改为 ConsumerStatefulWidget。模型列表数据源 = 预设 `availableModels` + `getFetchedModels`（去重合并）。合并后仍为空时显示文本输入框让用户手动输入模型名
+  - **LM Studio needsApiKey 改 false**（`ai_providers.dart`）：LM Studio 默认无鉴权，`needsApiKey` 从 `true` 改为 `false`，测试连接不再要求填 API Key
+  - **testConnection 去掉 model 依赖**（`ai_router_service.dart`）：回退探活 `/chat/completions` 不再传 model 字段（LM Studio 会用默认加载的模型）
+  - **_buildCloudLlmConfig 传 customUrl**（`settings_screen.dart`）：切换到 LM Studio/自定义提供商时，从 SharedPreferences 读取 AI Router 保存的 URL 设入 `LlmConfig.customUrl`，确保 CloudLlmEngine 有 baseUrl 可用。同时加 `aiRouterRoute` 参数允许跳转配置
+- **问题 2：恢复 GGUF ASR 优先级**
+  - v0.8.1 因 GGUF ASR 同步 FFI 闪退风险把 sherpa-onnx 提到优先。但用户下载 Qwen3-ASR 0.6B 说明想用（质量更优）。0.6B 模型小推理快，samples 长度保护已加（traps.md #37），恢复 GGUF ASR > sherpa-onnx > 云端优先级。GGUF ASR 内部优先选 0.6B（轻量低延迟）
+- **验证**：`flutter analyze`（6 文件）→ 3 个 info（deprecation 提示，不影响编译）；`flutter build apk --debug` → 成功（58.6s）；版本号 0.8.2+1 → 0.9.0+1
+- **待真机测试**：GGUF ASR 0.6B 实时转写是否正常 + LM Studio 选模型是否正常 + 自定义接口模型获取
 
 ### v0.8.1 (2026-07-10) - 修复录音启动失败 + 闪退问题
 - **目标**：修复"bad state: already been listened to"启动失败 + 录音说话后闪退两个阻断性 bug

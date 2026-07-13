@@ -233,7 +233,7 @@ class AiProviders {
     isImageSupported: true,
   );
 
-  /// LM Studio（本地推理）
+  /// LM Studio（本地推理，默认无鉴权，但支持配置 API Key）
   static const lmstudio = AiProviderConfig(
     type: AiProviderType.lmstudio,
     displayName: 'LM Studio (本地)',

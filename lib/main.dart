@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -5,6 +7,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:sherpa_onnx/sherpa_onnx.dart' as sherpa_onnx;
 import 'package:nota/core/theme.dart';
 import 'package:nota/routes/app_router.dart';
+import 'package:nota/services/llm/llm_task_router.dart';
 import 'package:nota/services/storage/database_helper.dart';
 
 final themeModeProvider = StateProvider<AppThemeMode>((ref) => AppThemeMode.dark);
@@ -70,7 +73,21 @@ class _NotaAppState extends ConsumerState<NotaApp> with WidgetsBindingObserver {
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
+    // 释放 LLM 引擎缓存（含本地 GB 级 GGUF 模型 + llama.cpp backend）。
+    // fire-and-forget：进程退出时 Dart VM 会被回收，原生资源由 OS 清理，
+    // 但热重启场景下需显式释放避免内存累积。
+    unawaited(LlmTaskRouter().disposeAll());
     super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    // app 进入 detached（即将退出）：尽力释放 LLM 引擎缓存。
+    // detached 后进程可能被立即杀死，异步释放可能未完成，但原生资源
+    //（llama.cpp backend）的 FFI 调用是同步的，关键释放能完成。
+    if (state == AppLifecycleState.detached) {
+      unawaited(LlmTaskRouter().disposeAll());
+    }
   }
 
   @override

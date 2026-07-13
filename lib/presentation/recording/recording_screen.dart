@@ -69,6 +69,9 @@ class _RecordingScreenState extends ConsumerState<RecordingScreen>
   // 实时翻译开关
   bool _realtimeTranslationEnabled = false;
 
+  // 翻译目标语言（默认中文），持久化到 SharedPreferences
+  String _translationTargetLang = '中文';
+
   // 当前会话
   String? _currentSessionId;
   String? _currentSessionDir;
@@ -89,6 +92,15 @@ class _RecordingScreenState extends ConsumerState<RecordingScreen>
       vsync: this,
       duration: const Duration(milliseconds: 1200),
     );
+    _loadTranslationTargetLang();
+  }
+
+  Future<void> _loadTranslationTargetLang() async {
+    final prefs = await SharedPreferences.getInstance();
+    final saved = prefs.getString('translation_target_lang');
+    if (saved != null && mounted) {
+      setState(() => _translationTargetLang = saved);
+    }
   }
 
   @override
@@ -109,13 +121,13 @@ class _RecordingScreenState extends ConsumerState<RecordingScreen>
 
   /// 检测并初始化 ASR 引擎。
   ///
-  /// 优先级：
-  /// 1. 本地 sherpa-onnx ASR（SenseVoice/Paraformer/Whisper，移动端稳定）
-  ///    → SherpaRealtimeAsrEngine（优先 SenseVoice > Paraformer > 其他）
-  /// 2. 本地 GGUF ASR（Qwen3-ASR via llama.cpp，质量优但同步 FFI 可能阻塞）
-  ///    → LocalRealtimeAsrEngine
-  /// 3. 云端 ASR（需配置 baseUrl + apiKey）→ CloudRealtimeAsrEngine
-  /// 4. 均不可用 → 抛 StateError，UI 提示去设置页配置
+  /// 本地引擎由用户在设置页选择偏好（SharedPreferences key:
+  /// `asr_local_engine_pref`，默认 `sherpa`）：
+  /// - `sherpa`：sherpa-onnx（SenseVoice/Paraformer/Whisper），稳定
+  /// - `gguf`：GGUF ASR（Qwen3-ASR via llama.cpp），质量优但可能闪退
+  ///
+  /// 选定偏好后，若对应模型未下载则自动回退到另一种引擎。
+  /// 云端 ASR 作为最后的回退方案。
   Future<void> _initAsrEngine() async {
     if (_asrEngine != null && _asrEngine!.isReady) return;
 
@@ -128,46 +140,55 @@ class _RecordingScreenState extends ConsumerState<RecordingScreen>
     final vadPath = await _asrModelManager.getVadModelPath();
     final asrConfig = await _loadAsrConfig();
 
-    // 优先 1：本地 sherpa-onnx ASR（移动端稳定，ONNX 运行时成熟）
-    final sherpaModels = await _asrModelManager.getDownloadedModels();
-    if (sherpaModels.isNotEmpty) {
-      // 优先 sensevoice-zh（多语言，魔搭下载，国内首选），
-      // 其次 paraformer-zh（中文，支持热词），否则取第一个
-      final chosen = sherpaModels.firstWhere(
-        (m) => m.id == 'sensevoice-zh',
-        orElse: () => sherpaModels.firstWhere(
-          (m) => m.id == 'paraformer-zh',
-          orElse: () => sherpaModels.first,
-        ),
-      );
-      _asrEngine = SherpaRealtimeAsrEngine(
-        sherpaModelId: chosen.id,
-        vadModelPath: vadPath,
-        language: asrConfig?.language ?? 'zh',
-      );
-      _asrStatusHint = '使用本地 sherpa-onnx（${chosen.displayName}）';
-      await _asrEngine!.init();
-      return;
-    }
+    // 读取用户在设置页选择的本地 ASR 引擎偏好
+    final prefs = await SharedPreferences.getInstance();
+    final enginePref = prefs.getString('asr_local_engine_pref') ?? 'sherpa';
 
-    // 优先 2：本地 GGUF ASR（Qwen3-ASR，质量优但同步 FFI 可能阻塞主线程）
     final ggufModels = await _asrModelManager.getDownloadedGgufModels();
-    if (ggufModels.isNotEmpty) {
-      // 优先 1.7B（质量更好），否则取第一个
-      final chosen = ggufModels.firstWhere(
-        (m) => m.id == 'qwen3-asr-1.7b',
-        orElse: () => ggufModels.first,
-      );
-      _asrEngine = LocalRealtimeAsrEngine(
-        ggufModelId: chosen.id,
-        vadModelPath: vadPath,
-      );
-      _asrStatusHint = '使用本地 GGUF ASR（${chosen.displayName}）';
-      await _asrEngine!.init();
-      return;
+    final sherpaModels = await _asrModelManager.getDownloadedModels();
+
+    // 按偏好顺序尝试引擎，模型未下载时自动回退
+    final tryOrder = enginePref == 'gguf'
+        ? <String>['gguf', 'sherpa']
+        : <String>['sherpa', 'gguf'];
+
+    for (final engineType in tryOrder) {
+      if (engineType == 'gguf' && ggufModels.isNotEmpty) {
+        // 优先 0.6B（轻量低延迟），否则取第一个
+        final chosen = ggufModels.firstWhere(
+          (m) => m.id == 'qwen3-asr-0.6b',
+          orElse: () => ggufModels.first,
+        );
+        _asrEngine = LocalRealtimeAsrEngine(
+          ggufModelId: chosen.id,
+          vadModelPath: vadPath,
+        );
+        _asrStatusHint = '使用本地 GGUF ASR（${chosen.displayName}）';
+        await _asrEngine!.init();
+        return;
+      }
+      if (engineType == 'sherpa' && sherpaModels.isNotEmpty) {
+        // 优先 sensevoice-zh（多语言，魔搭下载，国内首选），
+        // 其次 paraformer-zh（中文，支持热词），否则取第一个
+        final chosen = sherpaModels.firstWhere(
+          (m) => m.id == 'sensevoice-zh',
+          orElse: () => sherpaModels.firstWhere(
+            (m) => m.id == 'paraformer-zh',
+            orElse: () => sherpaModels.first,
+          ),
+        );
+        _asrEngine = SherpaRealtimeAsrEngine(
+          sherpaModelId: chosen.id,
+          vadModelPath: vadPath,
+          language: asrConfig?.language ?? 'zh',
+        );
+        _asrStatusHint = '使用本地 sherpa-onnx（${chosen.displayName}）';
+        await _asrEngine!.init();
+        return;
+      }
     }
 
-    // 优先 3：云端 ASR
+    // 回退：云端 ASR
     if (asrConfig != null &&
         asrConfig.engineType == AsrEngineType.cloud &&
         (asrConfig.baseUrl?.isNotEmpty ?? false) &&
@@ -360,11 +381,12 @@ class _RecordingScreenState extends ConsumerState<RecordingScreen>
       _isListening = false;
     });
 
-    // 持久化到数据库
-    _transcriptStorage.insertSegment(segment).catchError((e) {
+    // 持久化到数据库（fire-and-forget：实时转写回调中不阻塞流式体验，
+    // 失败兜底打印日志，seg.id 为 null 时由 catch 路径处理）
+    unawaited(_transcriptStorage.insertSegment(segment).catchError((e) {
       debugPrint('[TranscriptStorage] insert failed: $e');
       return -1;
-    });
+    }));
 
     // 自动滚动到底部
     WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -377,9 +399,9 @@ class _RecordingScreenState extends ConsumerState<RecordingScreen>
       }
     });
 
-    // 实时翻译
+    // 实时翻译（fire-and-forget：不阻塞 onFinal 回调链）
     if (_realtimeTranslationEnabled) {
-      _translateSegment(_segments.length - 1);
+      unawaited(_translateSegment(_segments.length - 1));
     }
   }
 
@@ -395,13 +417,13 @@ class _RecordingScreenState extends ConsumerState<RecordingScreen>
       }
 
       final originalText = _segments[index].originalText;
-      const systemPrompt = '你是专业翻译。将用户提供的文本翻译为中文。'
-          '只输出译文，不要解释或添加额外内容。如果原文已是中文，原样输出。';
+      final systemPrompt = _buildTranslationPrompt(_translationTargetLang);
 
       final partialBuf = StringBuffer();
       await engine.generate(
         systemPrompt: systemPrompt,
         userPrompt: originalText,
+        enableThinking: false, // 翻译是简单任务，关闭思考模式加速生成
         onToken: (token) {
           partialBuf.write(token);
           if (mounted) {
@@ -416,15 +438,15 @@ class _RecordingScreenState extends ConsumerState<RecordingScreen>
               _partialTranslations[index] = fullText.trim();
             });
           }
-          // 持久化译文
+          // 持久化译文（fire-and-forget）
           final segId = _segments[index].id;
           if (segId != null) {
-            _transcriptStorage
+            unawaited(_transcriptStorage
                 .updateTranslation(segId, fullText.trim())
                 .catchError((e) {
               debugPrint('[Translation] persist failed: $e');
               return -1;
-            });
+            }));
           }
         },
         onError: (err) {
@@ -805,7 +827,39 @@ class _RecordingScreenState extends ConsumerState<RecordingScreen>
     );
   }
 
-  static const double _translationToggleWidth = 48 + 32.0; // 开关 + 文字估算
+  static const double _translationToggleWidth = 96.0; // 开关 + 语言下拉框
+
+  /// 可选翻译目标语言列表。
+  ///
+  /// "自动（中英互译）"为双向互译模式：检测原文是中文则翻译为英语，
+  /// 原文是英语则翻译为中文，其他语言保持原文。
+  static const List<String> _targetLanguages = [
+    '自动（中英互译）', '中文', '英语', '日语', '韩语', '法语', '德语', '西班牙语', '俄语',
+  ];
+
+  /// 构建翻译 system prompt。
+  ///
+  /// 工具型应用要求译文确定、忠实、零发散，prompt 显式约束：
+  /// - 仅输出译文，禁止解释/注释/前后缀/思考过程
+  /// - 保留原文段落结构与标点风格
+  /// - 数字、专有名词、代码、URL 保持原样
+  /// - 互译模式：自动检测中英双向翻译；普通模式：翻译到指定目标语言
+  String _buildTranslationPrompt(String targetLang) {
+    const baseConstraints = '严格规则：\n'
+        '1) 只输出译文正文，不要输出思考过程、解释、注释、引号或任何前后缀\n'
+        '2) 保留原文的段落结构与标点风格\n'
+        '3) 数字、专有名词、人名、代码、URL、文件路径保持原样不翻译\n'
+        '4) 忠于原文含义，不增删信息，不意译发挥\n'
+        '5) 译文需自然流畅，符合目标语言习惯';
+    if (targetLang == '自动（中英互译）') {
+      return '你是专业翻译。任务：检测用户提供的文本语言——'
+          '若为中文翻译为英语，若为英语翻译为中文，其他语言原样输出。\n'
+          '$baseConstraints';
+    }
+    return '你是专业翻译。任务：将用户提供的文本翻译为$targetLang。'
+        '若原文已是$targetLang则原样输出。\n'
+        '$baseConstraints';
+  }
 
   Widget _buildTranslationToggle() {
     return SizedBox(
@@ -815,17 +869,43 @@ class _RecordingScreenState extends ConsumerState<RecordingScreen>
         children: [
           Switch(
             value: _realtimeTranslationEnabled,
-            onChanged: _isRecording
-                ? null
-                : (v) => setState(() => _realtimeTranslationEnabled = v),
+            // 录音中也可切换：开启时翻译已有段落，关闭时仅停止后续翻译
+            onChanged: (v) {
+              setState(() => _realtimeTranslationEnabled = v);
+              if (v && _isRecording && _segments.isNotEmpty) {
+                // 录音中开启翻译：补译已有但未翻译的段落
+                // fire-and-forget：并发触发多段翻译（LlmTaskRouter 缓存引擎，
+                // 翻译任务串行排队由引擎内部处理，此处不阻塞 UI）
+                for (var i = 0; i < _segments.length; i++) {
+                  if (_partialTranslations.length <= i ||
+                      _partialTranslations[i] == null) {
+                    unawaited(_translateSegment(i));
+                  }
+                }
+              }
+            },
             materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
           ),
-          Text(
-            '翻译',
+          // 目标语言下拉框（随时可选，录音中切换不影响已翻译段落）
+          DropdownButton<String>(
+            value: _translationTargetLang,
+            isExpanded: true,
+            underline: const SizedBox(),
             style: TextStyle(
               fontSize: 11,
-              color: Theme.of(context).colorScheme.onSurfaceVariant,
+              color: _realtimeTranslationEnabled
+                  ? Theme.of(context).colorScheme.primary
+                  : Theme.of(context).colorScheme.onSurfaceVariant,
             ),
+            items: _targetLanguages
+                .map((lang) => DropdownMenuItem(value: lang, child: Text(lang)))
+                .toList(),
+            onChanged: (value) async {
+              if (value == null) return;
+              setState(() => _translationTargetLang = value);
+              final prefs = await SharedPreferences.getInstance();
+              await prefs.setString('translation_target_lang', value);
+            },
           ),
         ],
       ),
@@ -902,7 +982,8 @@ class _RecordingScreenState extends ConsumerState<RecordingScreen>
     final sessionId = _currentSessionId;
     final sessionDir = _currentSessionDir;
 
-    // 停止录音（不等待转写队列）
+    // 停止录音：先停麦克风与流订阅，再 await ASR 引擎 stop 等待转写队列
+    // 排空，避免后续删除 session 时仍有 onFinal 回调在写孤儿段落。
     _timer?.cancel();
     _timer = null;
     _pulseController.stop();
@@ -910,7 +991,7 @@ class _RecordingScreenState extends ConsumerState<RecordingScreen>
     await _micRecorder.stopStream();
     await _streamSub?.cancel();
     _streamSub = null;
-    _asrEngine?.stop();
+    await _asrEngine?.stop();
 
     // 清理数据
     if (sessionId != null) {

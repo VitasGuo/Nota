@@ -651,4 +651,9 @@ class AsrModelManager {
       await dir.delete(recursive: true);
     }
   }
+
+  /// 释放 Dio 资源（app 退出时调用）。
+  void dispose() {
+    _dio.close();
+  }
 }

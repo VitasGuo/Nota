@@ -89,8 +89,8 @@ class NoteService {
 
     onProgress?.call(1.0);
 
-    // 5. 解析输出并构造 Note
-    final parsed = _parseNoteOutput(output);
+    // 5. 解析输出并构造 Note（过滤思考过程标签）
+    final parsed = _parseNoteOutput(_stripThinkTags(output));
     final now = DateTime.now();
     final note = Note(
       sessionId: sessionId,
@@ -129,7 +129,7 @@ class NoteService {
       onToken: onToken,
     );
 
-    final parsed = _parseNoteOutput(output);
+    final parsed = _parseNoteOutput(_stripThinkTags(output));
     final now = DateTime.now();
     return Note(
       sessionId: '',
@@ -161,6 +161,7 @@ class NoteService {
     await engine.generate(
       systemPrompt: systemPrompt,
       userPrompt: userPrompt,
+      enableThinking: true, // 笔记整理是复杂任务，开启思考模式提升质量
       onToken: (token) {
         buffer.write(token);
         onToken?.call(token);
@@ -178,6 +179,23 @@ class NoteService {
     }
     // 优先用 onComplete 的完整文本，回退到流式累积的 buffer
     return result ?? buffer.toString();
+  }
+
+  /// 过滤模型输出中的 `<think>...</think>` 思考过程标签。
+  ///
+  /// 部分云端模型（Qwen3 / DeepSeek R1）在 enableThinking=true 时会输出
+  /// `<think>思考内容</think>` 然后才是正文。笔记仅需保留正文。
+  /// 同时处理未闭合的 `<think>` 标签（流式截断场景）。
+  String _stripThinkTags(String text) {
+    var result = text.replaceAll(
+      RegExp(r'<think>[\s\S]*?</think>', caseSensitive: false),
+      '',
+    );
+    result = result.replaceAll(
+      RegExp(r'<think>[\s\S]*$', caseSensitive: false),
+      '',
+    );
+    return result.trim();
   }
 
   /// 解析 LLM 输出为标题 / 分类 / 标签 / 正文。

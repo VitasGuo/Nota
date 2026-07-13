@@ -51,6 +51,9 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
   final TextEditingController _asrApiKeyController = TextEditingController();
   final TextEditingController _asrModelNameController = TextEditingController();
 
+  /// 本地 ASR 引擎偏好：`sherpa`（默认稳定）/ `gguf`（Qwen3-ASR 质量优）。
+  String _asrLocalEnginePref = 'sherpa';
+
   // —— GGUF ASR 模型（Qwen3-ASR via llama.cpp mtmd）——
   List<GgufAsrModelInfo> _downloadedGgufModels = [];
   String? _downloadingGgufModelId;
@@ -102,6 +105,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
     final downloaded = await AsrModelManager().getDownloadedModels();
     final downloadedGguf = await AsrModelManager().getDownloadedGgufModels();
     final vadReady = await AsrModelManager().isVadModelDownloaded();
+    final asrEnginePref = prefs.getString('asr_local_engine_pref') ?? 'sherpa';
 
     // LLM 按功能配置
     final router = LlmTaskRouter();
@@ -125,6 +129,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
         _downloadedModels = downloaded;
         _downloadedGgufModels = downloadedGguf;
         _vadReady = vadReady;
+        _asrLocalEnginePref = asrEnginePref;
         _llmConfigs.addAll(llmConfigs);
         _recordingSource = recordingSource;
         _loaded = true;
@@ -285,6 +290,8 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
       _buildVadStatusRow(),
       const Divider(height: 1),
       if (config.engineType == AsrEngineType.local) ...[
+        _buildLocalAsrEnginePref(),
+        const Divider(height: 1),
         _buildLocalAsrModels(),
         if (AsrModels.available
             .any((m) => !_downloadedModels.any((d) => d.id == m.id)))
@@ -315,6 +322,44 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
             ? '已就绪（内置 silero_vad.onnx ~2MB）'
             : '未就绪，请重新安装应用',
         style: TextStyle(fontSize: 11, color: AppTheme.textSecondary),
+      ),
+    );
+  }
+
+  /// 本地 ASR 引擎偏好选择（sherpa-onnx 稳定 / GGUF ASR 质量优）。
+  ///
+  /// sherpa-onnx（SenseVoice/Paraformer/Whisper）为默认，ONNX 运行时移动端
+  /// 成熟稳定；GGUF ASR（Qwen3-ASR via llama.cpp）质量更优但同步 FFI 有阻塞
+  /// 主线程风险。用户已下载对应模型后可在此切换。
+  Widget _buildLocalAsrEnginePref() {
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(16, 12, 16, 8),
+      child: DropdownButtonFormField<String>(
+        initialValue: _asrLocalEnginePref,
+        isExpanded: true,
+        decoration: const InputDecoration(
+          labelText: '本地 ASR 引擎',
+          isDense: true,
+          border: OutlineInputBorder(),
+          helperText: 'sherpa-onnx 稳定（默认） / GGUF ASR 质量优（可能闪退）',
+          helperMaxLines: 2,
+        ),
+        items: const [
+          DropdownMenuItem(
+            value: 'sherpa',
+            child: Text('sherpa-onnx（稳定）', overflow: TextOverflow.ellipsis),
+          ),
+          DropdownMenuItem(
+            value: 'gguf',
+            child: Text('GGUF ASR（质量优）', overflow: TextOverflow.ellipsis),
+          ),
+        ],
+        onChanged: (value) async {
+          if (value == null) return;
+          final prefs = await SharedPreferences.getInstance();
+          await prefs.setString('asr_local_engine_pref', value);
+          setState(() => _asrLocalEnginePref = value);
+        },
       ),
     );
   }
@@ -859,10 +904,24 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
       currentProvider: provider,
       currentModel: model,
       supportedProviderTypes: _textProviderTypes,
-      onProviderChanged: (p) {
-        final defaultModel = AiProviders.getByName(p)?.defaultModel ?? '';
-        _updateLlmConfig(
-            task, config.copyWith(providerName: p, modelName: defaultModel));
+      aiRouterRoute: '/settings/ai-router',
+      onProviderChanged: (p) async {
+        final providerConfig = AiProviders.getByName(p);
+        final defaultModel = providerConfig?.defaultModel ?? '';
+        // 本地/自定义提供商：从 AI Router 保存的 URL 读取，设入 customUrl
+        String? customUrl;
+        if (providerConfig?.showUrlAndModel ?? false) {
+          final prefs = await SharedPreferences.getInstance();
+          final savedUrl = prefs.getString('ai_router_url_$p');
+          if (savedUrl != null && savedUrl.isNotEmpty) {
+            customUrl = savedUrl;
+          }
+        }
+        _updateLlmConfig(task, config.copyWith(
+          providerName: p,
+          modelName: defaultModel,
+          customUrl: customUrl,
+        ));
       },
       onModelChanged: (m) {
         _updateLlmConfig(task, config.copyWith(modelName: m));

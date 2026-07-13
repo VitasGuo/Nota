@@ -502,41 +502,47 @@ class _TranscriptScreenState extends State<TranscriptScreen> {
     final currentLabel = _speakerLabels[speakerId] ?? speakerId;
     final controller = TextEditingController(text: currentLabel);
 
-    final newLabel = await showDialog<String>(
-      context: context,
-      builder: (dialogContext) {
-        return AlertDialog(
-          title: const Text('编辑说话人'),
-          content: TextField(
-            controller: controller,
-            autofocus: true,
-            decoration: const InputDecoration(
-              labelText: '说话人名称',
-              hintText: '请输入新的说话人标签',
+    String? newLabel;
+    try {
+      newLabel = await showDialog<String>(
+        context: context,
+        builder: (dialogContext) {
+          return AlertDialog(
+            title: const Text('编辑说话人'),
+            content: TextField(
+              controller: controller,
+              autofocus: true,
+              decoration: const InputDecoration(
+                labelText: '说话人名称',
+                hintText: '请输入新的说话人标签',
+              ),
             ),
-          ),
-          actions: [
-            TextButton(
-              onPressed: () => Navigator.of(dialogContext).pop(null),
-              child: const Text('取消'),
-            ),
-            TextButton(
-              onPressed: () =>
-                  Navigator.of(dialogContext).pop(controller.text.trim()),
-              child: const Text('确认'),
-            ),
-          ],
-        );
-      },
-    );
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.of(dialogContext).pop(null),
+                child: const Text('取消'),
+              ),
+              TextButton(
+                onPressed: () =>
+                    Navigator.of(dialogContext).pop(controller.text.trim()),
+                child: const Text('确认'),
+              ),
+            ],
+          );
+        },
+      );
+    } finally {
+      controller.dispose();
+    }
 
     if (newLabel == null || newLabel.isEmpty || !mounted) return;
+    final label = newLabel;
 
     try {
-      await _speakerStorage.updateLabel(speakerId, newLabel);
+      await _speakerStorage.updateLabel(speakerId, label);
       await _transcriptStorage.updateSpeakerId(segment.id!, speakerId);
       if (mounted) {
-        setState(() => _speakerLabels[speakerId] = newLabel);
+        setState(() => _speakerLabels[speakerId] = label);
         _showSuccess('已更新说话人标签');
       }
     } catch (e) {

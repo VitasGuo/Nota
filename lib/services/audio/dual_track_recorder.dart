@@ -67,5 +67,6 @@ class DualTrackRecorder {
   /// 释放资源
   Future<void> dispose() async {
     await _micRecorder.dispose();
+    await _speakerRecorder.dispose();
   }
 }

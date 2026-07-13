@@ -116,6 +116,8 @@ class _AiRouterNotifier extends StateNotifier<_AiRouterState> {
         testResults: {...state.testResults, provider: success},
         fetchedModels: {...state.fetchedModels, provider: models},
       );
+      // 持久化获取到的模型列表，供 LLM 按功能配置页选择
+      await AiRouterService.saveFetchedModels(provider, models);
     } catch (e) {
       final newTesting = Set<String>.from(state.testingProviders);
       newTesting.remove(provider);
@@ -228,7 +230,6 @@ class _ProviderCard extends StatefulWidget {
 class _ProviderCardState extends State<_ProviderCard> {
   late final TextEditingController _apiKeyController;
   late final TextEditingController _urlController;
-  late final TextEditingController _modelController;
   Timer? _apiKeySaveDebounce;
 
   @override
@@ -236,36 +237,25 @@ class _ProviderCardState extends State<_ProviderCard> {
     super.initState();
     _apiKeyController = TextEditingController(text: widget.apiKey);
     _urlController = TextEditingController(text: widget.provider.defaultBaseUrl);
-    _modelController = TextEditingController(text: widget.provider.defaultModel);
     _loadSavedValues();
   }
 
-  /// URL/Model 持久化 key：按 provider type 独立存储，互不覆盖。
+  /// URL 持久化 key：按 provider type 独立存储，互不覆盖。
   String get _urlKey => 'ai_router_url_${widget.provider.type.name}';
-  String get _modelKey => 'ai_router_model_${widget.provider.type.name}';
 
-  /// 从 SharedPreferences 加载已保存的 URL/Model，覆盖默认值。
+  /// 从 SharedPreferences 加载已保存的 URL，覆盖默认值。
   Future<void> _loadSavedValues() async {
     final prefs = await SharedPreferences.getInstance();
     final savedUrl = prefs.getString(_urlKey);
-    final savedModel = prefs.getString(_modelKey);
     if (!mounted) return;
     if (savedUrl != null && savedUrl.isNotEmpty) {
       _urlController.text = savedUrl;
-    }
-    if (savedModel != null && savedModel.isNotEmpty) {
-      _modelController.text = savedModel;
     }
   }
 
   Future<void> _saveUrl(String value) async {
     final prefs = await SharedPreferences.getInstance();
     await prefs.setString(_urlKey, value);
-  }
-
-  Future<void> _saveModel(String value) async {
-    final prefs = await SharedPreferences.getInstance();
-    await prefs.setString(_modelKey, value);
   }
 
   @override
@@ -282,7 +272,6 @@ class _ProviderCardState extends State<_ProviderCard> {
     _apiKeySaveDebounce?.cancel();
     _apiKeyController.dispose();
     _urlController.dispose();
-    _modelController.dispose();
     super.dispose();
   }
 
@@ -306,8 +295,6 @@ class _ProviderCardState extends State<_ProviderCard> {
               children: [
                 if (p.showUrlAndModel) ...[
                   _buildUrlField(),
-                  const SizedBox(height: 8),
-                  _buildModelField(),
                   const SizedBox(height: 8),
                 ],
                 _buildApiKeyArea(),
@@ -374,10 +361,9 @@ class _ProviderCardState extends State<_ProviderCard> {
 
   Future<void> _doTest() async {
     final p = widget.provider;
-    // 测试前自动保存当前输入，确保测试使用已持久化值且退出后不丢失
+    // 测试前自动保存 URL，确保测试使用已持久化值且退出后不丢失
     if (p.showUrlAndModel) {
       await _saveUrl(_urlController.text.trim());
-      await _saveModel(_modelController.text.trim());
     }
     if (p.needsApiKey &&
         !p.hasPresetKey &&
@@ -402,19 +388,6 @@ class _ProviderCardState extends State<_ProviderCard> {
         border: OutlineInputBorder(),
       ),
       onChanged: (value) => _saveUrl(value.trim()),
-    );
-  }
-
-  Widget _buildModelField() {
-    return TextField(
-      controller: _modelController,
-      decoration: const InputDecoration(
-        labelText: '模型名',
-        hintText: '如 google/gemma-3-12b',
-        isDense: true,
-        border: OutlineInputBorder(),
-      ),
-      onChanged: (value) => _saveModel(value.trim()),
     );
   }
 
