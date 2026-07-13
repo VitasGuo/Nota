@@ -3,9 +3,34 @@
 ## 项目目标
 NOTA - Note with ASR，私人 AI 笔记软件。基于 Flutter，集成 ai_router_module 统一管理多 AI 平台，聚焦"录音 → 转写 → 笔记"场景。派生自 xiaop v1.4.1（AI 情感陪伴助手），继承其多 AI 提供商、主题等基础设施，后续将向笔记 + 语音识别（ASR）方向演进。
 
-## 当前版本: v0.9.7
+## 当前版本: v0.9.8
 
 ## 版本历史
+
+### v0.9.8 (2026-07-14) - ASR 设置二级菜单 + AI Router key bug 修复 + 本地模型测试加载
+- **目标**：① 设置页 ASR 部分抽取为独立子页面，简化主设置页；② 修复 AI Router key 输入后"测试连接"按钮不激活的 bug；③ 本地 GGUF 模型加"测试加载"按钮，让用户在设置页验证模型能否正常加载；④ whisper 下载区块加国内 403 警告提示
+- **AI Router key bug 修复**（`ai_router_screen.dart`）
+  - 根因：`_loadSavedValues()` 异步加载 URL 后未 `setState`，`_canTest()` 不重新计算，按钮保持 disabled；key `onChanged` 也无 `setState`
+  - 修复：`_loadSavedValues()` 末尾加 `setState(() {})`；key `onChanged` 加 `setState(() {})` 让按钮随输入实时激活
+- **本地 LLM 模型测试加载**（`settings_screen.dart` + `local_llm_engine.dart`）
+  - `_buildLocalLlmConfig` 新增"测试加载模型"按钮（OutlinedButton + loading 状态）
+  - 新增 `_testLocalLlmLoad(modelId)` 方法：创建临时 LocalLlmEngine → init → 获取 modelDesc → dispose → SnackBar 反馈成功/失败
+  - `LocalLlmEngine` 新增 `modelDesc` getter（透传 LlamaCppEngine.modelDesc）
+  - 解决用户"怎么知道本地 GGUF 已正常加载"的疑问——设置页即可验证
+- **ASR 设置子页面抽取**（新建 `lib/presentation/settings/asr_settings_screen.dart`，976 行）
+  - 包含所有 ASR 状态字段（`_asrConfig`/`_downloadedModels`/`_downloadingModelId`/`_downloadProgress`/`_asrBaseUrlController`/`_asrApiKeyController`/`_asrModelNameController`/`_asrLocalEnginePref`/`_downloadedGgufModels`/`_downloadingGgufModelId`/`_ggufDownloadProgress`/`_ggufDownloadStage`/`_downloadedWhisperModels`/`_downloadingWhisperModelId`/`_whisperDownloadProgress`/`_vadReady`/`_loaded`）
+  - 包含所有 ASR 方法（`_loadAsrData`/`_asrConfigToJson`/`_asrConfigFromJson`/`_saveAsrConfig`/`_showSaved`/`_buildAsrSection`/`_buildVadStatusRow`/`_buildLocalAsrEnginePref`/`_buildLocalAsrModels`/`_buildCloudAsrFields`/`_buildLanguageRow`/`_langLabel`/`_downloadModel`/`_deleteModel`/`_buildDownloadList`/`_buildWhisperAsrSection`/`_downloadWhisperModel`/`_importWhisperModel`/`_deleteWhisperModel`/`_buildGgufAsrSection`/`_downloadGgufModel`/`_importGgufModel`/`_deleteGgufModel`/`_buildSectionTitle`/`_sectionCard`）
+  - whisper.cpp 模型区块顶部加橙色警告 Container（国内 hf-mirror 403 下载问题提示）
+  - `_sectionCard`/`_buildSectionTitle`/`_showSaved` 共用辅助方法在两个文件各自保留
+- **主设置页简化**（`settings_screen.dart`，1660 → ~660 行）
+  - 删除所有 ASR 状态字段、ASR 序列化方法、ASR build 区块、ASR 业务方法（约 1010 行）
+  - 删除 ASR 相关 import（`dart:convert`/`asr_engine.dart`/`asr_model_info.dart`/`asr_model_manager.dart`），新增 `asr_settings_screen.dart` import
+  - build 方法中三个 ASR 区块替换为单个 ListTile 入口（`AsrSettingsScreen` 跳转）
+  - 删除空 dispose 方法（ASR controller 已移走，LLM 不用 controller）
+  - 简化 `_loadAll`：仅加载 LLM 配置 + 本地 LLM 模型 + 录音源
+- **enableThinking 参数修复**（traps.md #48）
+  - `_testLocalLlmLoad` 方法中 `LlmConfig(...)` 构造函数误传 `enableThinking: false`（该参数属于 `generate()` 方法，不属于 `LlmConfig`），导致 `flutter analyze` 报 `undefined_named_parameter` error。移除该行
+- **验证**：`flutter analyze lib/`（7 个 info 全部 pre-existing，0 error/warning）；版本号 0.9.7+1 → 0.9.8+1
 
 ### v0.9.7 (2026-07-14) - Qwen3-0.6B 本地翻译 + 下载源全面迁移魔搭 + whisper magic 修复
 - **目标**：① 新增 Qwen3-0.6B 作为本地文本 LLM 模型（非 ASR），打通翻译走本地 llama.cpp 路径；② 修复 whisper.cpp ggml 模型 magic header 校验失败（字节序问题）；③ 所有模型下载源尽可能迁移到魔搭社区（ModelScope），国内网络最友好

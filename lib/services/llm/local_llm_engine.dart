@@ -41,6 +41,9 @@ class LocalLlmEngine extends LlmEngine {
   @override
   bool get isReady => _isReady;
 
+  /// 模型描述（如 "Qwen3 0.6B Q8_0"），加载前返回空字符串。
+  String get modelDesc => _llama.isLoaded ? _llama.modelDesc : '';
+
   @override
   Future<void> init(LlmConfig config) async {
     // 幂等：相同模型已加载则直接返回

@@ -244,6 +244,9 @@ class _ProviderCardState extends State<_ProviderCard> {
   String get _urlKey => 'ai_router_url_${widget.provider.type.name}';
 
   /// 从 SharedPreferences 加载已保存的 URL，覆盖默认值。
+  ///
+  /// 加载后必须 setState 触发重建，否则 _canTest() 不会重新计算，
+  /// "测试连接"按钮保持 disabled 状态（即使 URL 和 Key 已填充）。
   Future<void> _loadSavedValues() async {
     final prefs = await SharedPreferences.getInstance();
     final savedUrl = prefs.getString(_urlKey);
@@ -251,6 +254,7 @@ class _ProviderCardState extends State<_ProviderCard> {
     if (savedUrl != null && savedUrl.isNotEmpty) {
       _urlController.text = savedUrl;
     }
+    setState(() {});
   }
 
   Future<void> _saveUrl(String value) async {
@@ -429,6 +433,8 @@ class _ProviderCardState extends State<_ProviderCard> {
         }
       },
       onChanged: (value) {
+        // setState 让 _canTest() 重新计算，"测试连接"按钮随输入实时激活
+        setState(() {});
         final trimmed = value.trim();
         if (trimmed.isEmpty) return;
         _apiKeySaveDebounce?.cancel();

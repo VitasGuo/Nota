@@ -78,7 +78,7 @@
 - 热词管理（`presentation/hotwords/`）：分组卡片 + 词条 CRUD + 批量导入导出 + 权重编辑
 - 说话人管理（`presentation/speakers/`）：声纹库列表、标签编辑、关联会话查看、删除
 - 数据管理（`presentation/data/`）：存储用量统计、导入（音频/MD/热词/说话人）、导出（会话zip/笔记MD/热词txt/全量备份）、清理缓存
-- 设置（`presentation/settings/`）：7 分区——ASR 引擎配置 / LLM 按功能配置 / API Key 管理 / 录音配置 / 管理入口（热词/说话人/数据）/ 外观 / 关于
+- 设置（`presentation/settings/`）：6 分区——ASR 入口（跳转 `AsrSettingsScreen` 子页面，含引擎配置/模型下载/whisper/GGUF 管理）/ LLM 按功能配置 / API Key 管理 / 录音配置 / 管理入口（热词/说话人/数据）/ 外观 / 关于
 
 ### 已实现（NOTA 业务 - Task 4-6 音频采集 v0.3.0）
 - 双轨同步录音（`lib/services/audio/`）：mic 麦克风 + speaker 扬声器内录，各自输出 16kHz 单声道 WAV（ASR 标准输入）
@@ -180,7 +180,7 @@ lib/
     ├── hotwords/       # ★ 热词词库管理（Task 21b v0.3.0）
     ├── speakers/       # ★ 说话人管理（声纹库列表/标签编辑/删除）
     ├── data/           # ★ 数据管理（Task 21d v0.3.0）
-    ├── settings/       # ★ 设置（7 分区）+ 关于 + AI Router 管理页
+    ├── settings/       # ★ 设置（6 分区 + ASR 子页面）+ 关于 + AI Router 管理页
     └── widgets/        # 通用组件（ai_config_selector 模型选择器）
 ```
 

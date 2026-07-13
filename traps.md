@@ -377,3 +377,10 @@
   - `asr_model_manager.dart` 的 `downloadWhisperModel` 用 try-catch 包裹 `_dio.download`，捕获到 403/302 时删除残留文件并抛出友好错误提示（引导用户下载魔搭源或手动导入）
   - `asr_model_info.dart` 的 `WhisperModels.available` 新增 `whisper-large-v3`（魔搭源 `LLM-Research/whisper-large-v3-ggml`，`ggml-model.bin`，3.1GB），作为 hf-mirror 403 时的备选下载源
   - 规律：hf-mirror.com 镜像对 Xet 存储文件无法直接代理（302 到 xethub.hf.co 被墙），国内下载模型应优先用魔搭社区（ModelScope）源；若魔搭无对应模型，可手动从 hf-mirror.com 网页下载后通过"导入"功能加载
+
+---
+
+## #48 LlmConfig 构造函数不接受 enableThinking — _testLocalLlmLoad 编译错误
+- **现象**: `flutter analyze` 报 `error - The named parameter 'enableThinking' isn't defined - lib\presentation\settings\settings_screen.dart:524:9 - undefined_named_parameter`
+- **根因**: `_testLocalLlmLoad` 方法中创建 `LlmConfig(engineType:, modelName:, temperature:, maxTokens:, enableThinking: false)`，但 `LlmConfig` 类（`lib/services/llm/llm_engine.dart:30-56`）的构造函数仅接受 `engineType`/`providerName`/`modelName`/`customUrl`/`maxTokens`/`temperature` 六个参数，**无 `enableThinking` 字段**。`enableThinking` 是 `LocalLlmEngine.generate()` 和 `CloudLlmEngine.generate()` 的方法参数（`bool enableThinking = false`），不属于配置对象。`_testLocalLlmLoad` 仅测试模型加载（init → modelDesc → dispose，不调用 generate），`enableThinking` 在此处无意义
+- **解决**: 移除 `LlmConfig(...)` 构造调用中的 `enableThinking: false` 行。规律：`LlmConfig` 是数据类（仅持久化引擎+模型+采样参数），`enableThinking` 是运行时行为参数（属 generate 方法），二者不可混用。新增调用 `LlmConfig` 时以源码构造函数签名为准
