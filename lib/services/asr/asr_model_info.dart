@@ -307,3 +307,119 @@ class GgufAsrModels {
     return null;
   }
 }
+
+// ============================================================================
+// whisper.cpp ASR 模型（ggml .bin 格式，非 GGUF）
+// ============================================================================
+
+/// whisper.cpp ASR 模型信息（基于 whisper.cpp 原生 ggml 格式）。
+///
+/// 与 [GgufAsrModelInfo]（llama.cpp mtmd，GGUF 双文件）不同，whisper.cpp
+/// 使用自有 ggml 格式（.bin 单文件），针对 CPU 推理优化，移动端成熟稳定。
+///
+/// 模型格式特点：
+/// - 单文件 .bin（无需 mmproj，音频编码器内置在主模型中）
+/// - 采样率固定 16000Hz（与 NOTA PCM16 16kHz 标准一致）
+/// - 不支持热词 boosting（whisper.cpp 无此能力）
+///
+/// 下载源：https://huggingface.co/ggerganov/whisper.cpp
+/// 国内通过 hf-mirror.com 镜像下载。
+class WhisperModelInfo {
+  /// 模型唯一标识，作为本地存储目录名。
+  final String id;
+
+  /// 用户可见的显示名。
+  final String displayName;
+
+  /// 模型文件名（如 `ggml-small.bin`）。
+  final String filename;
+
+  /// 下载地址（hf-mirror.com 镜像）。
+  final String downloadUrl;
+
+  /// 模型大小（字节）。
+  final int sizeBytes;
+
+  /// 支持语言（zh / en / multi）。
+  final String language;
+
+  /// 模型描述。
+  final String? description;
+
+  const WhisperModelInfo({
+    required this.id,
+    required this.displayName,
+    required this.filename,
+    required this.downloadUrl,
+    required this.sizeBytes,
+    required this.language,
+    this.description,
+  });
+
+  /// 模型大小（MB）。
+  double get sizeMb => sizeBytes / (1024 * 1024);
+
+  @override
+  String toString() =>
+      'WhisperModelInfo($id, $displayName, ${sizeMb.toStringAsFixed(0)}MB)';
+}
+
+/// 预置 whisper.cpp 模型清单。
+///
+/// 集中维护 NOTA 支持的 whisper.cpp ggml 模型。与 [AsrModels]（sherpa-onnx）
+/// 和 [GgufAsrModels]（llama.cpp mtmd）分开管理，因模型格式与加载方式不同。
+///
+/// 引擎实现：[WhisperRealtimeAsrEngine] + [WhisperIsolateWorker] + [WhisperEngine]，
+/// 加载 libwhisper_android.so（C wrapper 见 tool/whisper-build/whisper_wrapper.c）。
+class WhisperModels {
+  WhisperModels._();
+
+  /// HF 镜像前缀（国内网络友好）。
+  static const String _hfMirror = 'https://hf-mirror.com';
+
+  /// 预置 whisper.cpp ggml 模型清单。
+  ///
+  /// 按推荐度排序：
+  /// - ggml-tiny.bin（~39MB，英文，测试用，体积最小）
+  /// - ggml-small.bin（~466MB，多语言，中文最小可用，推荐首选）
+  /// - ggml-large-v3-turbo-q5_0.bin（~547MB，多语言，质量最优，存储空间充裕首选）
+  static const List<WhisperModelInfo> available = [
+    WhisperModelInfo(
+      id: 'whisper-tiny',
+      displayName: 'Whisper Tiny (39MB, 英文, 测试用)',
+      filename: 'ggml-tiny.bin',
+      downloadUrl: '$_hfMirror/ggerganov/whisper.cpp/resolve/main/ggml-tiny.bin',
+      sizeBytes: 39 * 1024 * 1024,
+      language: 'en',
+      description: 'whisper.cpp 最小模型，仅英文，用于测试引擎是否正常工作',
+    ),
+    WhisperModelInfo(
+      id: 'whisper-small',
+      displayName: 'Whisper Small (466MB, 多语言, 中文首选)',
+      filename: 'ggml-small.bin',
+      downloadUrl: '$_hfMirror/ggerganov/whisper.cpp/resolve/main/ggml-small.bin',
+      sizeBytes: 466 * 1024 * 1024,
+      language: 'multi',
+      description: 'whisper.cpp Small 模型，支持中文，体积与质量均衡，推荐首选',
+    ),
+    WhisperModelInfo(
+      id: 'whisper-large-v3-turbo',
+      displayName: 'Whisper Large v3 Turbo Q5 (547MB, 多语言, 质量最优)',
+      filename: 'ggml-large-v3-turbo-q5_0.bin',
+      downloadUrl:
+          '$_hfMirror/ggerganov/whisper.cpp/resolve/main/ggml-large-v3-turbo-q5_0.bin',
+      sizeBytes: 547 * 1024 * 1024,
+      language: 'multi',
+      description: 'whisper.cpp Large v3 Turbo Q5_0 量化版，质量最优，'
+          '存储空间充裕时首选',
+    ),
+  ];
+
+  /// 按 id 查询 whisper.cpp 模型信息，未找到返回 null。
+  static WhisperModelInfo? getById(String id) {
+    for (final m in available) {
+      if (m.id == id) return m;
+    }
+    return null;
+  }
+}

@@ -6,8 +6,11 @@
 // 录音时的实时场景：边录音边 VAD 分段，每段语音结束立即送 ASR 推理，
 // 转写文本通过 [onFinal] 回调实时推送到 UI。
 //
-// 三个实现：
+// 四个实现：
 // - [LocalRealtimeAsrEngine]：VAD + llama.cpp Qwen3-ASR（离线，低延迟，需 GGUF ~1-2.4GB）
+//   ASR 推理在持久化 worker Isolate 中执行，不阻塞主线程（traps.md #45）
+// - [WhisperRealtimeAsrEngine]：VAD + whisper.cpp ggml 模型（离线，中文最小 ~466MB，
+//   质量优且稳定，v0.9.6 新增）。同样在 worker Isolate 执行推理
 // - [SherpaRealtimeAsrEngine]：VAD + sherpa-onnx OfflineRecognizer（离线，SenseVoice ~239MB 首选 / Paraformer ~213MB 回退）
 // - [CloudRealtimeAsrEngine]：VAD + 云端 Whisper 兼容 API（在线，需网络）
 
@@ -23,8 +26,9 @@ import 'package:nota/services/asr/asr_engine.dart';
 import 'package:nota/services/asr/asr_model_info.dart';
 import 'package:nota/services/asr/asr_model_manager.dart';
 import 'package:nota/services/asr/cloud_asr_engine.dart';
+import 'package:nota/services/asr/isolate_asr_worker.dart';
 import 'package:nota/services/asr/vad_detector.dart';
-import 'package:nota/services/llm/llama_cpp_engine.dart';
+import 'package:nota/services/asr/whisper_isolate_worker.dart';
 
 /// 实时 ASR 引擎类型。
 enum RealtimeAsrEngineType { local, cloud }
@@ -100,12 +104,16 @@ class _PendingSpeech {
 
 /// 本地实时 ASR 引擎。
 ///
-/// 基于 [VadDetector]（sherpa-onnx Silero VAD）分段 + [LlamaCppEngine]
+/// 基于 [VadDetector]（sherpa-onnx Silero VAD）分段 + [IsolateAsrWorker]
 /// （llama.cpp mtmd Qwen3-ASR）逐段转写。完全离线，无网络依赖。
 ///
 /// 转写异步处理：VAD 分段在音频流订阅回调中同步完成（快速），每段送入
-/// 待转写队列；后台逐段调用 [LlamaCppEngine.transcribeAudio]（1-3s/段），
-/// 完成后触发 [onFinal]。多段累积时按 FIFO 顺序处理。
+/// 待转写队列；逐段通过 [IsolateAsrWorker.transcribe] 发送到 worker Isolate
+/// 执行推理（1-3s/段），完成后触发 [onFinal]。多段累积时按 FIFO 顺序处理。
+///
+/// ASR 推理在持久化 worker Isolate 中执行，避免同步 FFI 调用阻塞主线程
+/// 导致 ANR/crash（traps.md #45）。worker 在 [init] 时启动并加载模型，
+/// [dispose] 时销毁，期间复用同一份模型。
 ///
 /// 构造时需指定 [ggufModelId]（来自 [GgufAsrModels.available]）与
 /// [vadModelPath]（来自 [AsrModelManager.getVadModelPath]）。
@@ -133,7 +141,7 @@ class LocalRealtimeAsrEngine extends RealtimeAsrEngine {
   /// VAD 参数配置。
   final VadConfig vadConfig;
 
-  LlamaCppEngine? _llama;
+  IsolateAsrWorker? _worker;
   VadDetector? _vad;
 
   StreamSubscription<Uint8List>? _sub;
@@ -159,15 +167,15 @@ class LocalRealtimeAsrEngine extends RealtimeAsrEngine {
     if (_disposed) throw StateError('引擎已释放');
     if (_isReady) return;
 
-    // 1. 加载 Qwen3-ASR 模型
+    // 1. 加载 Qwen3-ASR 模型（在 worker Isolate 中加载，避免阻塞主线程）
     final manager = AsrModelManager();
     if (!await manager.isGgufModelDownloaded(ggufModelId)) {
       throw StateError('GGUF ASR 模型 $ggufModelId 未下载，请先下载');
     }
     final paths = await manager.getGgufModelPaths(ggufModelId);
 
-    _llama = LlamaCppEngine();
-    await _llama!.loadAsrModel(
+    _worker = IsolateAsrWorker();
+    await _worker!.spawn(
       paths.mainPath,
       paths.mmprojPath,
       nCtx: nCtx,
@@ -231,15 +239,17 @@ class LocalRealtimeAsrEngine extends RealtimeAsrEngine {
     await stop();
     _vad?.dispose();
     _vad = null;
-    _llama?.dispose();
-    _llama = null;
+    await _worker?.dispose();
+    _worker = null;
     _disposed = true;
   }
 
   /// 逐段处理待转写队列。
   ///
-  /// 串行处理：同一时刻仅一个转写任务在执行，避免 llama.cpp 上下文竞争。
+  /// 串行处理：同一时刻仅一个转写任务在执行，避免 worker Isolate 上下文竞争。
   /// 每段转写完成后触发 [onFinal]，异常触发 [onError]（不中断队列）。
+  ///
+  /// ASR 推理在 worker Isolate 中执行，[transcribe] 调用不阻塞主线程。
   Future<void> _processQueue() async {
     if (_transcribing) return;
     _transcribing = true;
@@ -249,7 +259,193 @@ class LocalRealtimeAsrEngine extends RealtimeAsrEngine {
       // 跳过过短的音频段（< 0.1s = 1600 样本 @ 16kHz），避免原生库 crash
       if (seg.samples.length < 1600) continue;
       try {
-        final text = _llama!.transcribeAudio(seg.samples);
+        final text = await _worker!.transcribe(seg.samples);
+        if (text.isNotEmpty && _sessionId != null) {
+          onFinal?.call(TranscriptSegment(
+            sessionId: _sessionId!,
+            startTime: seg.startSec,
+            endTime: seg.endSec,
+            originalText: text,
+          ));
+        }
+      } catch (e, st) {
+        onError?.call(e, st);
+      }
+    }
+
+    _transcribing = false;
+  }
+}
+
+// ============================================================================
+// whisper.cpp 实时 ASR 引擎（VAD + whisper.cpp ggml 模型）
+// ============================================================================
+
+/// 基于 whisper.cpp 的实时 ASR 引擎。
+///
+/// 与 [LocalRealtimeAsrEngine]（llama.cpp Qwen3-ASR via mtmd，GGUF 双文件）
+/// 不同，本引擎使用 whisper.cpp 原生 ggml 模型（.bin 单文件），通过
+/// [WhisperIsolateWorker] 在独立 Isolate 执行推理，避免同步 FFI 阻塞主线程。
+///
+/// 模型来源：https://huggingface.co/ggerganov/whisper.cpp
+/// - ggml-tiny.bin（~39MB，英文，最快，测试用）
+/// - ggml-base.bin（~74MB，多语言，基础）
+/// - ggml-small.bin（~466MB，多语言，中文最小可用）
+/// - ggml-large-v3-turbo-q5_0.bin（~547MB，多语言，质量首选）
+///
+/// 适用场景：用户想要比 sherpa-onnx Whisper 更轻量、比 Qwen3-ASR 更稳定的
+/// 本地方案。whisper.cpp 移动端成熟，ggml 格式针对 CPU 推理优化，且单文件
+/// 模型管理简单。完全离线，无网络依赖。
+///
+/// 构造时需指定 [whisperModelId]（来自 [WhisperModels.available]）与
+/// [vadModelPath]（来自 [AsrModelManager.getVadModelPath]）。
+class WhisperRealtimeAsrEngine extends RealtimeAsrEngine {
+  WhisperRealtimeAsrEngine({
+    required this.whisperModelId,
+    required this.vadModelPath,
+    this.language = 'auto',
+    this.nThreads = 4,
+    this.vadConfig = const VadConfig(),
+  });
+
+  /// whisper.cpp 模型 id（如 `whisper-small`，见 [WhisperModels.available]）。
+  final String whisperModelId;
+
+  /// VAD 模型文件路径（silero_vad.onnx）。
+  final String vadModelPath;
+
+  /// 识别语言（whisper.cpp 代码：auto / zh / en / ja / ko 等）。
+  final String language;
+
+  /// 推理线程数。
+  final int nThreads;
+
+  /// VAD 参数配置。
+  final VadConfig vadConfig;
+
+  WhisperIsolateWorker? _worker;
+  VadDetector? _vad;
+
+  StreamSubscription<Uint8List>? _sub;
+  String? _sessionId;
+  bool _isReady = false;
+  bool _running = false;
+  bool _disposed = false;
+
+  final _pending = <_PendingSpeech>[];
+  bool _transcribing = false;
+
+  @override
+  RealtimeAsrEngineType get engineType => RealtimeAsrEngineType.local;
+
+  @override
+  bool get isReady => _isReady;
+
+  @override
+  bool get isRunning => _running;
+
+  @override
+  Future<void> init() async {
+    if (_disposed) throw StateError('引擎已释放');
+    if (_isReady) return;
+
+    final info = WhisperModels.getById(whisperModelId);
+    if (info == null) {
+      throw ArgumentError('未知的 whisper.cpp 模型 id: $whisperModelId');
+    }
+
+    final manager = AsrModelManager();
+    if (!await manager.isWhisperModelDownloaded(whisperModelId)) {
+      throw StateError('whisper.cpp 模型 $whisperModelId 未下载，请先下载');
+    }
+    final modelPath = await manager.getWhisperModelPath(whisperModelId);
+
+    // 启动 worker Isolate 加载模型（避免阻塞主线程）
+    _worker = WhisperIsolateWorker();
+    await _worker!.spawn(
+      modelPath,
+      language: language,
+      nThreads: nThreads,
+    );
+
+    // 创建 VAD
+    _vad = VadDetector(
+      modelPath: vadModelPath,
+      threshold: vadConfig.threshold,
+      minSilenceDuration: vadConfig.minSilenceDuration,
+      minSpeechDuration: vadConfig.minSpeechDuration,
+      maxSpeechDuration: vadConfig.maxSpeechDuration,
+      windowSize: vadConfig.windowSize,
+      sampleRate: vadConfig.sampleRate,
+      numThreads: vadConfig.numThreads,
+      onSpeechStart: () => onSpeechStart?.call(),
+      onSpeechEnd: (startSample, samples, startSec, endSec) {
+        _pending.add(_PendingSpeech(samples, startSec, endSec));
+        _processQueue();
+      },
+    );
+
+    _isReady = true;
+  }
+
+  @override
+  Future<void> start(Stream<Uint8List> audioStream, String sessionId) async {
+    if (!_isReady) throw StateError('引擎未初始化，请先调用 init()');
+    if (_running) return;
+
+    _sessionId = sessionId;
+    _running = true;
+    _sub = audioStream.listen(
+      (bytes) => _vad?.feedPcm16(bytes),
+      onError: (e, st) => onError?.call(e, st),
+      onDone: () => stop(),
+    );
+  }
+
+  @override
+  Future<void> stop() async {
+    if (!_running) return;
+    _running = false;
+
+    await _sub?.cancel();
+    _sub = null;
+
+    // flush VAD 尾部残余段
+    _vad?.flush();
+
+    // 等待队列中所有段转写完成
+    while (_transcribing || _pending.isNotEmpty) {
+      await Future<void>.delayed(const Duration(milliseconds: 50));
+    }
+  }
+
+  @override
+  Future<void> dispose() async {
+    if (_disposed) return;
+    await stop();
+    _vad?.dispose();
+    _vad = null;
+    await _worker?.dispose();
+    _worker = null;
+    _disposed = true;
+  }
+
+  /// 逐段处理待转写队列。
+  ///
+  /// 串行处理：同一时刻仅一个转写任务在执行，避免 worker Isolate 上下文竞争。
+  /// 每段转写完成后触发 [onFinal]，异常触发 [onError]（不中断队列）。
+  ///
+  /// ASR 推理在 worker Isolate 中执行，[transcribe] 调用不阻塞主线程。
+  Future<void> _processQueue() async {
+    if (_transcribing) return;
+    _transcribing = true;
+
+    while (_pending.isNotEmpty) {
+      final seg = _pending.removeAt(0);
+      // 跳过过短的音频段（< 0.1s = 1600 样本 @ 16kHz），避免原生库 crash
+      if (seg.samples.length < 1600) continue;
+      try {
+        final text = await _worker!.transcribe(seg.samples);
         if (text.isNotEmpty && _sessionId != null) {
           onFinal?.call(TranscriptSegment(
             sessionId: _sessionId!,

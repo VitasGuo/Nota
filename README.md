@@ -2,7 +2,7 @@
 
 基于 Flutter 的私人 AI 笔记软件，集成 ai_router_module 统一管理多 AI 平台。派生自 xiaop v1.4.1（AI 情感陪伴助手），继承其多 AI 提供商、主题等基础设施，聚焦"录音 → 转写 → 笔记"场景。
 
-> 当前为 v0.9.5：工具型应用按 LLM 任务差异化配置——翻译/纠错（低温度 0.1 + 短输出 + 关闭 thinking）求稳不发散，纪要/笔记整理（中温度 0.4 + 开启 thinking）允许归纳推理。Prompt 加严格格式约束（只输出正文/保留段落/数字专名保留/忠于原文不增删）。LlmTaskRouter 引擎缓存 + 并发去重（`_pendingFutures`）防止重复加载 GB 级模型 OOM；`<think>` 标签过滤防污染纪要/笔记；llama.cpp backend 静态化管理（单实例 dispose 不释放全局 backend，app 退出统一 `disposeBackend()`）；disposeAll 双保险调用（NotaApp.dispose + detached 生命周期）。录音时麦克风 PCM16 流 → VAD 分段 → 本地 ASR 实时转写（用户可选 sherpa-onnx 或 GGUF Qwen3-ASR）→ 文字逐句显示，可选实时翻译到指定语言。含 ASR 引擎、LLM 引擎（云端 SSE + 本地 llama.cpp FFI）、声纹识别、热词词库、数据管理、完整界面 7 分区。继承自 xiaop v1.4.1。
+> 当前为 v0.9.6：引入 whisper.cpp 作为默认本地 ASR 引擎，替代 llama.cpp mtmd 接口（同步 FFI 闪退问题）。whisper.cpp（ggml .bin 模型）专门做 ASR，移动端成熟稳定且质量优；llama.cpp（GGUF）保留用于本地文本 LLM 推理（翻译/纠错/纪要，未来跑 Qwen3 0.6B）；sherpa-onnx 保留作为稳定备选 ASR。引擎优先级：whisper > sherpa > gguf > cloud（默认 whisper）。whisper.cpp 静态链接 ggml + version script 隐藏符号避免与 llama.cpp 的 libggml.so 冲突；C wrapper 简化 FFI（whisper_simple_init/transcribe/free 3 函数）；持久化 worker Isolate 避免同步 FFI 阻塞主线程。继承 v0.9.5 工具型应用按 LLM 任务差异化配置——翻译/纠错（低温度 0.1 + 短输出 + 关闭 thinking）求稳不发散，纪要/笔记整理（中温度 0.4 + 开启 thinking）允许归纳推理。Prompt 加严格格式约束（只输出正文/保留段落/数字专名保留/忠于原文不增删）。LlmTaskRouter 引擎缓存 + 并发去重（`_pendingFutures`）防止重复加载 GB 级模型 OOM；`<think>` 标签过滤防污染纪要/笔记；llama.cpp backend 静态化管理（单实例 dispose 不释放全局 backend，app 退出统一 `disposeBackend()`）；disposeAll 双保险调用（NotaApp.dispose + detached 生命周期）。录音时麦克风 PCM16 流 → VAD 分段 → 本地 ASR 实时转写（用户可选 whisper.cpp/sherpa-onnx/GGUF Qwen3-ASR）→ 文字逐句显示，可选实时翻译到指定语言。含 ASR 引擎、LLM 引擎（云端 SSE + 本地 llama.cpp FFI）、声纹识别、热词词库、数据管理、完整界面 7 分区。继承自 xiaop v1.4.1。
 
 ## 功能范围
 
@@ -39,13 +39,15 @@
 ### 已实现（NOTA 业务 - Task 8/9 ASR 引擎实现 v0.4.0 + Task 6/7 实时 ASR v0.6.0）
 - LocalAsrEngine（`lib/services/asr/local_asr_engine.dart`）：基于 sherpa-onnx OfflineRecognizer，支持 SenseVoice（多语言，v0.8.0 新增）/ Whisper（中英文）/ Paraformer（中文，支持热词 boosting）模型；流式 onSegment 回调逐段输出；AsrModelManager 管理模型下载/激活/删除（Dio 流式下载 + 目录管理，v0.8.0 新增 ModelScope 下载源）；含 Android arm64 原生库
 - CloudAsrEngine（`lib/services/asr/cloud_asr_engine.dart`）：OpenAI Whisper API 兼容格式（multipart/form-data 上传音频文件），云端转写
-- RealtimeAsrEngine（`lib/services/asr/realtime_asr_engine.dart`，v0.6.0，v0.8.0 新增 SherpaRealtimeAsrEngine）：实时 ASR 引擎抽象 + 三个实现
+- RealtimeAsrEngine（`lib/services/asr/realtime_asr_engine.dart`，v0.6.0，v0.8.0 新增 SherpaRealtimeAsrEngine，v0.9.6 新增 WhisperRealtimeAsrEngine）：实时 ASR 引擎抽象 + 四个实现
+  - WhisperRealtimeAsrEngine（v0.9.6，默认推荐）：VAD 分段 → 串行队列 → WhisperIsolateWorker.transcribe（whisper.cpp ggml 模型，持久化 worker Isolate 避免同步 FFI 阻塞主线程）→ onFinal 回调 TranscriptSegment
   - LocalRealtimeAsrEngine：VadDetector 分段 → 串行队列 → LlamaCppEngine.transcribeAudio（Qwen3-ASR via llama.cpp mtmd）→ onFinal 回调 TranscriptSegment
   - SherpaRealtimeAsrEngine（v0.8.0）：VAD 分段 → sherpa-onnx OfflineRecognizer 逐段转写，支持三类模型（SenseVoice 首选 / Paraformer 回退 / Whisper）
   - CloudRealtimeAsrEngine：VAD 分段 → 写临时 WAV → CloudAsrEngine.transcribe → onFinal；支持无 VAD 整段上传模式
   - 架构：转写异步串行队列，VAD 同步喂入快速不阻塞音频流；onPartial 未实现（整段推理无 token 级流式），UI 用 onSpeechStart 显示"正在转写..."占位
-  - 引擎优先级（v0.8.0）：GGUF ASR > sherpa-onnx ASR（SenseVoice > Paraformer）> 云端 ASR
+  - 引擎优先级（v0.9.6）：whisper.cpp > sherpa-onnx ASR（SenseVoice > Paraformer）> GGUF ASR > 云端 ASR（默认 whisper，用户可在设置页切换）
 - Qwen3-ASR GGUF 模型管理（v0.6.0）：AsrModelManager 新增 GGUF 双文件（主模型 + mmproj）下载/导入/校验。预置 Qwen3-ASR-1.7B（~2.4GB）+ 0.6B（~1.0GB）Q8_0，下载源 ggml-org 官方仓库经 hf-mirror.com 镜像。关键：handy-computer Q6_K 用 `qwen3_asr` 架构不兼容 llama.cpp mtmd，必须用 ggml-org 的 `qwen3vl` 架构版本（traps.md #33）
+- whisper.cpp ASR 引擎（v0.9.6，默认推荐）：引入 whisper.cpp 作为专用 ASR 引擎替代 llama.cpp mtmd 接口。`libwhisper_android.so`（2.09MB，arm64-v8a）静态链接 ggml + version script 隐藏 ggml 符号避免与 llama.cpp 的 libggml.so 冲突；C wrapper（`whisper_simple_init/transcribe/free`）简化复杂 `whisper_full_params` 结构体供 Dart FFI 绑定。WhisperIsolateWorker 持久化 worker Isolate 封装，`whisper_full` 阻塞调用移到 worker 避免主线程 ANR。预置 3 个 ggml .bin 模型（tiny 39MB 英文测试 / small 466MB 多语言中文首选 / large-v3-turbo 547MB 质量最优），下载源 hf-mirror.com。AsrModelManager 新增 whisper 模型管理（下载/导入/校验/删除），ggml magic header `[0x67,0x67,0x6d,0x6c]` 校验文件有效性
 
 ### 已实现（NOTA 业务 - Task 12 LLM 引擎实现 v0.4.0 + Task 10 LocalLlmEngine v0.6.0）
 - CloudLlmEngine（`lib/services/llm/cloud_llm_engine.dart`）：基于 ai_router_module，调用 OpenAI 兼容 /chat/completions，SSE 流式解析（onToken 逐 token 回调 + onComplete/onError），复用 ApiKeyService 三级 Key 解析链
@@ -141,11 +143,15 @@ lib/
 │   ├── audio/          # ★ 音频采集模块（mic_recorder / speaker_recorder / dual_track_recorder）
 │   ├── asr/            # ★ ASR 引擎（抽象接口 + 本地/云端实现 + 实时 ASR + VAD + 热词管理）
 │   │   ├── asr_engine.dart         # AsrEngine 抽象 + AsrEngineType/AsrConfig
-│   │   ├── asr_model_info.dart     # AsrModelInfo + 预置模型清单 + GgufAsrModels（Qwen3-ASR GGUF，v0.6.0）
-│   │   ├── asr_model_manager.dart  # ★ 模型下载/激活/删除 + GGUF 双文件管理（v0.6.0）
+│   │   ├── asr_model_info.dart     # AsrModelInfo + 预置模型清单 + GgufAsrModels（Qwen3-ASR GGUF，v0.6.0）+ WhisperModels（whisper.cpp ggml，v0.9.6）
+│   │   ├── asr_model_manager.dart  # ★ 模型下载/激活/删除 + GGUF 双文件管理（v0.6.0）+ whisper ggml 模型管理（v0.9.6）
 │   │   ├── local_asr_engine.dart   # ★ LocalAsrEngine（sherpa-onnx OfflineRecognizer）
 │   │   ├── cloud_asr_engine.dart   # ★ CloudAsrEngine（OpenAI Whisper API）
-│   │   ├── realtime_asr_engine.dart# ★ RealtimeAsrEngine 抽象 + Local/Cloud 实时实现（v0.6.0）
+│   │   ├── realtime_asr_engine.dart# ★ RealtimeAsrEngine 抽象 + Local/Sherpa/Whisper/Cloud 四实现（v0.6.0+，v0.9.6 新增 Whisper）
+│   │   ├── whisper_ffi.dart        # ★ whisper.cpp C wrapper 的 Dart FFI 绑定（whisper_simple_*，v0.9.6）
+│   │   ├── whisper_engine.dart     # ★ WhisperEngine 高层封装（load/transcribe/dispose，v0.9.6）
+│   │   ├── whisper_isolate_worker.dart # ★ WhisperIsolateWorker 持久化 worker Isolate（v0.9.6）
+│   │   ├── isolate_asr_worker.dart # ★ IsolateAsrWorker 持久化 worker Isolate（llama.cpp GGUF ASR，v0.9.6）
 │   │   ├── vad_detector.dart       # ★ VadDetector（sherpa-onnx Silero VAD 队列式封装 + PCM16→Float32）
 │   │   └── hotword_dictionary.dart # 外挂热词词库中介（ASR 注入 / LLM 纠错参考）
 │   ├── pipeline/       # ★ 笔记流水线（转写→声纹→纠错→翻译→纪要→笔记，v0.4.0）
@@ -226,15 +232,16 @@ LLM 整理 ──► NoteStorage.insertNote ──► notes 表（session_id 关
 
 > PipelineOrchestrator 单例编排上述 6 步，支持 runFullPipeline 一键执行 / runStep 分步执行，onStepProgress + onLog 回调；错误传播策略见"关键设计决策"。
 
-## 核心数据流（实时 ASR 转写，v0.6.0，v0.8.0 新增 SenseVoice）
+## 核心数据流（实时 ASR 转写，v0.6.0，v0.8.0 新增 SenseVoice，v0.9.6 新增 whisper.cpp）
 
 ```
 麦克风 PCM16 流 (MicRecorder.startStream, 16kHz 单声道)
   → VadDetector.feedPcm16 (sherpa-onnx Silero VAD 队列式分段)
   → onSpeechEnd(samples, startSec, endSec) → 入 _pending 队列
   → 串行 _processQueue (按引擎优先级选择其一):
-      ├─ LocalRealtimeAsrEngine: LlamaCppEngine.transcribeAudio (Qwen3-ASR GGUF via mtmd) → 文本
+      ├─ WhisperRealtimeAsrEngine: WhisperIsolateWorker.transcribe (whisper.cpp ggml 模型，worker Isolate) → 文本 [v0.9.6 默认]
       ├─ SherpaRealtimeAsrEngine: sherpa-onnx OfflineRecognizer (SenseVoice 首选 / Paraformer / Whisper) → 文本
+      ├─ LocalRealtimeAsrEngine: IsolateAsrWorker → LlamaCppEngine.transcribeAudio (Qwen3-ASR GGUF via mtmd，worker Isolate) → 文本
       └─ CloudRealtimeAsrEngine: 写临时 WAV → CloudAsrEngine.transcribe → 合并文本
   → onFinal(TranscriptSegment) → RecordingScreen:
       ├─ UI: 段落卡片加入列表 + 自动滚动
@@ -243,7 +250,7 @@ LLM 整理 ──► NoteStorage.insertNote ──► notes 表（session_id 关
   → 停止: MicRecorder.stopStream + AsrEngine.stop (等待队列清空) + 写 WAV 备份 + 更新 session.endTime
 ```
 
-> 架构亮点：VAD 同步分段不阻塞音频流，转写异步串行处理；onPartial 未实现（整段推理无 token 级流式），UI 用 onSpeechStart 显示"正在转写..."占位。引擎优先级（v0.8.0）：GGUF ASR > sherpa-onnx ASR（SenseVoice > Paraformer）> 云端 ASR。
+> 架构亮点：VAD 同步分段不阻塞音频流，转写异步串行处理；onPartial 未实现（整段推理无 token 级流式），UI 用 onSpeechStart 显示"正在转写..."占位。引擎优先级（v0.9.6）：whisper.cpp > sherpa-onnx ASR（SenseVoice > Paraformer）> GGUF ASR > 云端 ASR（默认 whisper，用户可在设置页切换）。whisper.cpp 与 llama.cpp GGUF ASR 均用持久化 worker Isolate 避免同步 FFI 阻塞主线程。
 
 ## 关键设计决策
 
@@ -261,6 +268,7 @@ LLM 整理 ──► NoteStorage.insertNote ──► notes 表（session_id 关
 - **实时 ASR 串行队列架构（v0.6.0）**：RealtimeAsrEngine 采用「VAD 同步分段（快速不阻塞音频流）→ 每段入 _pending 队列 → 串行 _processQueue 调用 transcribeAudio（1-3s/段）→ onFinal 回调」架构。LocalRealtimeAsrEngine 用 LlamaCppEngine.transcribeAudio（Qwen3-ASR via llama.cpp mtmd 接口），CloudRealtimeAsrEngine 写临时 WAV + CloudAsrEngine.transcribe。onPartial 未实现（Qwen3-ASR 整段推理无 token 级流式），UI 用 onSpeechStart 显示"正在转写..."占位。GGUF ASR 模型为双文件（主模型 + mmproj），AsrModelManager.downloadGgufModel 顺序下载 + 加权进度 + 阶段回调。关键：handy-computer Q6_K 用 `qwen3_asr` 架构不兼容 llama.cpp mtmd（仅识别 `qwen3vl`），必须用 ggml-org 官方仓库版本（traps.md #33）
 - **ModelScope 下载源 + SenseVoice 多语言模型（v0.8.0）**：解决国内用户从 GitHub/HF 下载 ASR 模型超时问题。AsrModelInfo 新增 `modelscopeRepo`/`modelscopeFiles` 字段，AsrModelManager.downloadModel 优先走 ModelScope 分支（URL 格式 `https://www.modelscope.cn/api/v1/models/{repo}/repo?Revision=master&FilePath={file}`，API 返回 302 重定向 Dio 自动跟随）。新增 SenseVoice Small 模型（id `sensevoice-zh`，~239MB，从魔搭社区 `xiaowangge/sherpa-onnx-sense-voice-small` 下载，支持中英日韩粤 5 语言，Q8 量化），作为国内用户首选——体积小（239MB vs Qwen3-ASR 2.4GB）、下载稳定（魔搭 vs hf-mirror）、多语言覆盖广。SherpaRealtimeAsrEngine._buildRecognizerConfig 新增 SenseVoice 分支用 `OfflineSenseVoiceModelConfig`（useInverseTextNormalization: true 启用逆文本归一化）。引擎优先级：GGUF ASR > sherpa-onnx ASR（SenseVoice > Paraformer）> 云端 ASR。Dio receiveTimeout 提升至 30 分钟支持大文件下载
 - **LocalLlmEngine + LlamaCppEngine 双用途（v0.6.0）**：LlamaCppEngine 同时服务于文本 LLM 推理（load + generate 流式生成）与 ASR 音频转写（loadAsrModel + transcribeAudio，基于 Qwen3-ASR mtmd 接口），两种模式共享 llama.cpp backend + model + context 基础设施。LocalLlmEngine implements LlmEngine，包装 LlamaCppEngine 的文本模式：init 按 config.modelName 经 LlmModelManager 定位 GGUF → load；generate 按 ChatTemplateType（ChatML/Llama-3/Generic）构建 chat prompt → 同步流式生成。LlmModelManager 管理 GGUF 文本 LLM 模型（预置 Qwen2.5-1.5B/3B + Llama-3.2-3B，下载源 hf-mirror.com + file_picker 本地导入 + magic 校验）。性能限制：generate 为同步 FFI 调用，token 在返回前全部经 onToken 发出（UI 完成后渲染），真正异步流式需后续 Isolate 优化
+- **whisper.cpp 专用 ASR 引擎（v0.9.6）**：解决 Qwen3-ASR（llama.cpp mtmd 接口）同步 FFI 闪退问题，引入 whisper.cpp 作为专用 ASR 引擎。架构分层：whisper.cpp（ggml .bin 模型）专门做 ASR，llama.cpp（GGUF）专门做文本 LLM，sherpa-onnx 保留作为稳定备选 ASR。whisper.cpp Android 交叉编译关键决策：①`-DBUILD_SHARED_LIBS=OFF` 静态链接 ggml 到 libwhisper_android.so（2.09MB），避免单独 libggml.so 与 llama.cpp 的 libggml.so 符号冲突；②version script (`whisper.exports`) 只导出 `whisper_*` + `whisper_simple_*` 符号，隐藏 ggml 内部符号；③C wrapper（`whisper_simple_init/transcribe/free`）封装复杂 `whisper_full_params` 结构体（含回调指针、嵌套结构体），Dart FFI 侧只需绑定 3 个简单签名。WhisperIsolateWorker 持久化 worker Isolate 模式：`whisper_full` 是阻塞调用，必须移到 worker Isolate 避免主线程 ANR；worker 内复用同一模型实例（load/transcribe/dispose Map 消息 + SendPort 通信，与 IsolateAsrWorker 模式一致）。whisper.cpp 采样率 `WHISPER_SAMPLE_RATE = 16000` 与 NOTA 16kHz PCM16 标准一致；时间戳 `whisper_full_get_segment_t0/t1` 返回厘秒（10ms），需 `/ 100.0` 转秒。预置 3 个 ggml 模型（tiny 39MB / small 466MB / large-v3-turbo 547MB），下载源 hf-mirror.com，ggml magic header `[0x67,0x67,0x6d,0x6c]`（"ggml" ASCII）校验文件有效性。引擎优先级改为 whisper > sherpa > gguf > cloud（默认 whisper，用户可在设置页切换）
 
 ## 安装与构建
 

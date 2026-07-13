@@ -7,8 +7,8 @@
 // - ASR 音频转写（loadAsrModel + transcribeAudio，基于 Qwen3-ASR mtmd 接口）
 //
 // 线程安全：当前为同步实现，FFI 调用在调用线程执行。
-// 实时 ASR 场景下每段 VAD 分段推理 1-3 秒，短暂阻塞可接受。
-// 后续如需不阻塞 UI，可在调用方用 Isolate 包装（注意 FFI 指针不跨 Isolate）。
+// 实时 ASR 场景下由 [IsolateAsrWorker] 在独立 Isolate 中调用，不阻塞主线程。
+// 批量转写场景（TranscriptionService）可接受短暂阻塞。
 
 import 'dart:ffi';
 import 'dart:typed_data';

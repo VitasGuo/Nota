@@ -48,6 +48,8 @@ Thumbs.db
 *.aab
 *.ipa
 *.app
+tool/whisper-build/build-arm64/
+nota-ios-ipa.zip
 
 # Secrets / credentials
 .env

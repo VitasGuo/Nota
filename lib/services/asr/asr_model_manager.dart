@@ -652,6 +652,182 @@ class AsrModelManager {
     }
   }
 
+  // ==========================================================================
+  // whisper.cpp ASR 模型管理（ggml .bin 单文件格式）
+  // ==========================================================================
+
+  /// whisper.cpp ggml 模型 magic header：`ggml`（4 字节 0x67 0x67 0x6d 0x6c）。
+  ///
+  /// whisper.cpp 模型文件首 4 字节必须为此 magic，否则不是有效 ggml 模型。
+  /// 参考：whisper.cpp `whisper_model_loader` 中 `magic = ggml_hash("ggml")`。
+  static const List<int> _whisperGgmlMagic = [0x67, 0x67, 0x6d, 0x6c];
+
+  /// 返回 whisper.cpp 模型目录 `{docsDir}/asr_models/{modelId}/`，不存在则创建。
+  ///
+  /// 与 sherpa-onnx / GGUF ASR 模型共用 [getModelsDir] 根目录，按 modelId 区分。
+  Future<Directory> getWhisperModelDir(String modelId) async {
+    return getModelDir(modelId);
+  }
+
+  /// 校验文件是否为有效 whisper.cpp ggml 模型（检查首 4 字节 magic header）。
+  ///
+  /// [path] 文件路径。返回 true 表示是有效 ggml 模型文件。
+  /// 文件不存在或小于 4 字节时返回 false。
+  Future<bool> validateWhisperModelFile(String path) async {
+    final f = File(path);
+    if (!f.existsSync()) return false;
+
+    final raf = await f.open();
+    try {
+      final bytes = await raf.read(4);
+      if (bytes.length < 4) return false;
+      for (int i = 0; i < 4; i++) {
+        if (bytes[i] != _whisperGgmlMagic[i]) return false;
+      }
+      return true;
+    } finally {
+      await raf.close();
+    }
+  }
+
+  /// 检查 whisper.cpp 模型是否已下载（.bin 文件存在且 magic 合法）。
+  ///
+  /// [modelId] 来自 [WhisperModels.available] 的 id。
+  Future<bool> isWhisperModelDownloaded(String modelId) async {
+    final info = WhisperModels.getById(modelId);
+    if (info == null) return false;
+
+    final dir = await getWhisperModelDir(modelId);
+    final path = p.join(dir.path, info.filename);
+    if (!File(path).existsSync()) return false;
+
+    return validateWhisperModelFile(path);
+  }
+
+  /// 返回已下载的 whisper.cpp 模型清单。
+  Future<List<WhisperModelInfo>> getDownloadedWhisperModels() async {
+    final result = <WhisperModelInfo>[];
+    for (final m in WhisperModels.available) {
+      if (await isWhisperModelDownloaded(m.id)) {
+        result.add(m);
+      }
+    }
+    return result;
+  }
+
+  /// 返回 whisper.cpp 模型文件路径。
+  ///
+  /// 调用前应确保 [isWhisperModelDownloaded] 返回 true。
+  Future<String> getWhisperModelPath(String modelId) async {
+    final info = WhisperModels.getById(modelId);
+    if (info == null) {
+      throw ArgumentError('未知的 whisper.cpp 模型 id: $modelId');
+    }
+    final dir = await getWhisperModelDir(modelId);
+    return p.join(dir.path, info.filename);
+  }
+
+  /// 下载 whisper.cpp ggml 模型（单文件直接下载）。
+  ///
+  /// [modelId] 来自 [WhisperModels.available] 的 id。
+  /// [onProgress] 回调下载进度（0.0-1.0）。
+  ///
+  /// 下载到 `{docsDir}/asr_models/{modelId}/{filename}`，下载完成后校验
+  /// magic header，失败则删除已下载文件并抛出异常。
+  Future<void> downloadWhisperModel(
+    String modelId, {
+    void Function(double)? onProgress,
+  }) async {
+    final info = WhisperModels.getById(modelId);
+    if (info == null) {
+      throw ArgumentError('未知的 whisper.cpp 模型 id: $modelId');
+    }
+
+    // 已完整下载则跳过
+    if (await isWhisperModelDownloaded(modelId)) return;
+
+    final dir = await getWhisperModelDir(modelId);
+
+    // 清理残留旧文件
+    if (dir.existsSync()) {
+      await dir.delete(recursive: true);
+    }
+    await dir.create(recursive: true);
+
+    final outPath = p.join(dir.path, info.filename);
+
+    await _dio.download(
+      info.downloadUrl,
+      outPath,
+      onReceiveProgress: (received, total) {
+        if (total > 0 && onProgress != null) {
+          onProgress(received / total);
+        }
+      },
+    );
+
+    // 校验 magic header
+    if (!await validateWhisperModelFile(outPath)) {
+      try {
+        await File(outPath).delete();
+      } catch (_) {}
+      throw StateError(
+        'whisper.cpp 模型 $modelId 校验失败：magic header 不匹配（非有效 ggml 文件）',
+      );
+    }
+
+    onProgress?.call(1.0);
+  }
+
+  /// 从本地文件导入 whisper.cpp ggml 模型。
+  ///
+  /// 弹出文件选择器，用户选择 .bin 文件，复制到
+  /// `{docsDir}/asr_models/{modelId}/{filename}` 并校验 magic header。
+  ///
+  /// [modelId] 来自 [WhisperModels.available] 的 id。
+  /// 返回 true 表示导入成功，false 表示用户取消选择。
+  Future<bool> importWhisperModel(String modelId) async {
+    final info = WhisperModels.getById(modelId);
+    if (info == null) {
+      throw ArgumentError('未知的 whisper.cpp 模型 id: $modelId');
+    }
+
+    final result = await FilePicker.platform.pickFiles(
+      dialogTitle: '选择 whisper.cpp 模型文件（${info.filename}）',
+      type: FileType.custom,
+      allowedExtensions: ['bin'],
+    );
+    if (result == null || result.files.isEmpty) return false;
+    final srcPath = result.files.single.path!;
+
+    // 校验 magic
+    if (!await validateWhisperModelFile(srcPath)) {
+      throw StateError(
+        '所选文件不是有效 whisper.cpp ggml 模型（magic header 校验失败）',
+      );
+    }
+
+    // 复制到模型目录
+    final dir = await getWhisperModelDir(modelId);
+    if (dir.existsSync()) {
+      await dir.delete(recursive: true);
+    }
+    await dir.create(recursive: true);
+
+    final dstPath = p.join(dir.path, info.filename);
+    await File(srcPath).copy(dstPath);
+
+    return true;
+  }
+
+  /// 删除 whisper.cpp 模型（删除模型目录）。
+  Future<void> deleteWhisperModel(String modelId) async {
+    final dir = await getWhisperModelDir(modelId);
+    if (dir.existsSync()) {
+      await dir.delete(recursive: true);
+    }
+  }
+
   /// 释放 Dio 资源（app 退出时调用）。
   void dispose() {
     _dio.close();

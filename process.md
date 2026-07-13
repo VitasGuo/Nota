@@ -3,9 +3,37 @@
 ## 项目目标
 NOTA - Note with ASR，私人 AI 笔记软件。基于 Flutter，集成 ai_router_module 统一管理多 AI 平台，聚焦"录音 → 转写 → 笔记"场景。派生自 xiaop v1.4.1（AI 情感陪伴助手），继承其多 AI 提供商、主题等基础设施，后续将向笔记 + 语音识别（ASR）方向演进。
 
-## 当前版本: v0.9.5
+## 当前版本: v0.9.6
 
 ## 版本历史
+
+### v0.9.6 (2026-07-14) - 引入 whisper.cpp 作为默认本地 ASR 引擎
+- **目标**：解决 Qwen3-ASR（llama.cpp mtmd 接口）同步 FFI 闪退问题，引入 whisper.cpp 作为专用 ASR 引擎替代 llama.cpp mtmd，whisper.cpp 移动端成熟稳定且质量优。llama.cpp 保留用于本地文本 LLM 推理（翻译/纠错/纪要，未来跑 Qwen3 0.6B）
+- **架构决策**：whisper.cpp（ggml .bin 模型）专门做 ASR，llama.cpp（GGUF）专门做文本 LLM；sherpa-onnx 保留作为稳定备选 ASR。引擎优先级改为 whisper > sherpa > gguf > cloud（默认 whisper）
+- **whisper.cpp Android 交叉编译**（`tool/whisper-build/`）
+  - NDK r29 + CMake 4.1.2 + Ninja 1.10.2，arm64-v8a，`-DBUILD_SHARED_LIBS=OFF` 静态链接 ggml
+  - 符号冲突解决：`--whole-archive` 强制包含静态库 + version script (`whisper.exports`) 只导出 `whisper_*` 符号，隐藏 ggml 符号避免与 llama.cpp 的 libggml.so 冲突
+  - C wrapper 简化 FFI：`whisper_simple_init/transcribe/free` 3 个函数封装复杂 `whisper_full_params` 结构体
+  - 产物 `libwhisper_android.so` 2.09MB，strip 后 134 个 whisper_* + 3 个 whisper_simple_* 导出符号
+- **Dart FFI 绑定 + 引擎封装**（`lib/services/asr/`）
+  - `whisper_ffi.dart`：WhisperFfi 单例，绑定 3 个 whisper_simple_* 函数，返回 `List<({String text, double startSec, double endSec})>`
+  - `whisper_engine.dart`：WhisperEngine 高层封装，load/transcribe/dispose API
+  - `whisper_isolate_worker.dart`：持久化 worker Isolate（WhisperIsolateWorker），`load`/`transcribe`/`dispose` Map 消息 + SendPort 通信，worker 内复用同一模型实例。whisper_full 是阻塞调用，必须移到 worker Isolate 避免主线程 ANR（与 IsolateAsrWorker 模式一致）
+  - `realtime_asr_engine.dart`：新增 WhisperRealtimeAsrEngine（第 4 个实时 ASR 引擎实现），VAD 分段 → 串行队列 → WhisperIsolateWorker.transcribe → onFinal 回调
+- **whisper.cpp ggml 模型管理**（`asr_model_info.dart` + `asr_model_manager.dart`）
+  - 新增 WhisperModelInfo / WhisperModels 类，预置 3 个模型：
+    - whisper-tiny（ggml-tiny.bin，39MB，英文，测试用）
+    - whisper-small（ggml-small.bin，466MB，多语言，中文首选）
+    - whisper-large-v3-turbo（ggml-large-v3-turbo-q5_0.bin，547MB，多语言，质量最优）
+  - 下载源 `https://hf-mirror.com/ggerganov/whisper.cpp/resolve/main/{filename}`（国内网络友好）
+  - AsrModelManager 新增 whisper 模型管理方法：downloadWhisperModel / importWhisperModel / validateWhisperModelFile（ggml magic header `[0x67,0x67,0x6d,0x6c]` 校验）/ isWhisperModelDownloaded / getWhisperModelPath / deleteWhisperModel
+- **引擎选择逻辑 + 设置页 UI**（`recording_screen.dart` + `settings_screen.dart`）
+  - 默认引擎偏好从 `sherpa` 改为 `whisper`
+  - 引擎尝试顺序：gguf→[gguf,whisper,sherpa]、sherpa→[sherpa,whisper,gguf]、默认→[whisper,sherpa,gguf]
+  - 设置页新增 whisper.cpp 模型管理区块（已下载列表 + 下载/导入/删除 UI）
+  - 本地 ASR 引擎下拉框从 2 项改为 3 项（whisper/sherpa/gguf）
+- **验证**：`flutter analyze`（6 个既有 info，0 error/warning）；`flutter build apk --release` → 成功（60.1s，137.4MB）；版本号 0.9.5+1 → 0.9.6+1
+- **待真机测试**：whisper.cpp 实时转写稳定性 + ggml-small 模型中文识别准确率 + VAD 分段准确性 + magic header 校验是否通过
 
 ### v0.9.5 (2026-07-14) - LLM 任务差异化配置 + 全代码审查修复
 - **目标**：工具型应用按任务差异化配置 LLM 温度/maxTokens/thinking，优化 prompt 防发散；全代码审查修复 11 个真问题

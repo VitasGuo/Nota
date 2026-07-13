@@ -353,3 +353,17 @@
 - **现象**: 代码审查 H2 指出，纪要/笔记任务开启 enableThinking=true 后，Qwen3/DeepSeek R1 等云端模型在 Markdown 正文前输出 `<think>思考过程...</think>` 内容，被 SummaryService/NoteService 当作纪要正文存入数据库，用户看到带思考标签的污染笔记
 - **根因**: v0.9.5 区分任务 thinking 策略（纪要/笔记整理=true，翻译/纠错=false），但 SummaryService/NoteService 的 `onComplete` 回调直接存储 LLM 完整输出，未过滤 `<think>` 标签。云端 OpenAI 兼容 API 的 `enable_thinking` 字段仅控制是否生成思考内容，无法消除已生成的标签
 - **解决**: SummaryService 和 NoteService 各新增 `_stripThinkTags(String) → String` 方法，过滤两种情况：①完整 `<think>...</think>` 标签（`RegExp(r'<think>[\s\S]*?</think>', caseSensitive: false)`）；②未闭合的 `<think>...` 尾部标签（`RegExp(r'<think>[\s\S]*$', caseSensitive: false)`，防止 LLM 中断时残留）。`onComplete(fullText)` 回调中 `markdown = _stripThinkTags(fullText)` 后再存库。NoteService 的两处 `_parseNoteOutput(output)` 调用也包一层 `_stripThinkTags`。规律：开启 thinking 模式的 LLM 任务，下游解析必须过滤 `<think>` 标签（完整 + 未闭合两种情况），不能假设 LLM 总是输出格式良好的闭合标签
+
+---
+
+## #45 whisper.cpp 与 llama.cpp 共享库符号冲突 — 静态链接 ggml + version script 隐藏符号
+- **现象**: v0.9.6 引入 whisper.cpp 作为 ASR 引擎，与已有的 llama.cpp（libllama.so + libggml.so 等）共存于同一 APK。若 whisper.cpp 也动态链接 ggml（生成独立 libggml.so），两个 libggml.so 符号冲突导致运行时崩溃/未定义行为
+- **根因**: whisper.cpp 和 llama.cpp 都依赖 ggml 作为底层张量计算库。若两者各自动态链接 ggml，进程内存在两份 ggml 符号（同名全局符号），动态链接器只解析第一个，另一个库的 ggml 调用可能绑定到错误的实现，导致内存损坏/崩溃
+- **解决**: whisper.cpp 交叉编译时 `-DBUILD_SHARED_LIBS=OFF` 静态链接 ggml 到 libwhisper_android.so（2.09MB），不生成独立 libggml.so。同时用 version script (`whisper.exports`) 控制 libwhisper_android.so 的符号导出：只导出 `whisper_*` + `whisper_simple_*`（C wrapper 函数），隐藏所有 ggml 内部符号（`ggml_*` / `gguf_*` 等）。链接命令：`-Wl,--whole-archive libwhisper.a libggml.a -Wl,--no-whole-archive` + `-Wl,--version-script=whisper.exports`。规律：同一进程加载多个依赖相同底层库（如 ggml）的共享库时，至少一个必须静态链接底层库并隐藏其符号，避免动态符号冲突；version script (`--version-script`) 是控制 ELF 符号导出的精确工具，比 `-fvisibility=hidden` 更细粒度（可按符号名前缀过滤）
+
+---
+
+## #46 whisper.cpp ggml magic header 字节序 — 待真机验证
+- **现象**: v0.9.6 AsrModelManager.validateWhisperModelFile 用 `[0x67, 0x67, 0x6d, 0x6c]`（"ggml" ASCII 大端序）校验 whisper.cpp ggml .bin 模型文件首 4 字节。whisper.cpp 实际 .bin 文件可能使用小端序存储 uint32 magic，需真机测试验证校验是否通过
+- **根因**: ggml 文件格式规范中 magic header 为 `0x67676d6c`（"ggml" ASCII），但文件存储时的字节序取决于格式定义。whisper.cpp 源码 `whisper_model_loader` 读取 magic 时用 `fread` 直接读 4 字节，未做端序转换（ARM arm64-v8a 为小端架构）。若文件以小端序存储（`0x6c 0x6d 0x67 0x67`），当前大端序校验 `[0x67, 0x67, 0x6d, 0x6c]` 会失败，导致下载的合法模型被误判为无效文件并删除
+- **解决**: 待真机测试验证。若校验失败，将 magic header 改为小端序 `[0x6c, 0x6d, 0x67, 0x67]`，或改用 uint32 比较（`bytes.buffer.asByteData().getUint32(0, Endian.little) == 0x67676d6c`）。规律：二进制文件 magic header 校验需注意端序，ARM x86 均为小端架构，文件格式若按主机端序存储则读取时无需转换，但跨平台格式（如 GGUF）可能明确规定大端/小端；校验前查格式规范确认端序约定

@@ -122,11 +122,12 @@ class _RecordingScreenState extends ConsumerState<RecordingScreen>
   /// 检测并初始化 ASR 引擎。
   ///
   /// 本地引擎由用户在设置页选择偏好（SharedPreferences key:
-  /// `asr_local_engine_pref`，默认 `sherpa`）：
+  /// `asr_local_engine_pref`，默认 `whisper`）：
+  /// - `whisper`：whisper.cpp ggml 模型（v0.9.6 新增，稳定且质量优，推荐）
   /// - `sherpa`：sherpa-onnx（SenseVoice/Paraformer/Whisper），稳定
   /// - `gguf`：GGUF ASR（Qwen3-ASR via llama.cpp），质量优但可能闪退
   ///
-  /// 选定偏好后，若对应模型未下载则自动回退到另一种引擎。
+  /// 选定偏好后，若对应模型未下载则自动回退到其他引擎。
   /// 云端 ASR 作为最后的回退方案。
   Future<void> _initAsrEngine() async {
     if (_asrEngine != null && _asrEngine!.isReady) return;
@@ -140,19 +141,42 @@ class _RecordingScreenState extends ConsumerState<RecordingScreen>
     final vadPath = await _asrModelManager.getVadModelPath();
     final asrConfig = await _loadAsrConfig();
 
-    // 读取用户在设置页选择的本地 ASR 引擎偏好
+    // 读取用户在设置页选择的本地 ASR 引擎偏好（v0.9.6 默认改为 whisper）
     final prefs = await SharedPreferences.getInstance();
-    final enginePref = prefs.getString('asr_local_engine_pref') ?? 'sherpa';
+    final enginePref = prefs.getString('asr_local_engine_pref') ?? 'whisper';
 
+    final whisperModels = await _asrModelManager.getDownloadedWhisperModels();
     final ggufModels = await _asrModelManager.getDownloadedGgufModels();
     final sherpaModels = await _asrModelManager.getDownloadedModels();
 
-    // 按偏好顺序尝试引擎，模型未下载时自动回退
-    final tryOrder = enginePref == 'gguf'
-        ? <String>['gguf', 'sherpa']
-        : <String>['sherpa', 'gguf'];
+    // 按偏好顺序尝试引擎，模型未下载时自动回退到其他引擎
+    // whisper 优先于 sherpa（用户 v0.9.6 明确要求引入 whisper.cpp）
+    final tryOrder = switch (enginePref) {
+      'gguf' => <String>['gguf', 'whisper', 'sherpa'],
+      'sherpa' => <String>['sherpa', 'whisper', 'gguf'],
+      _ => <String>['whisper', 'sherpa', 'gguf'],
+    };
 
     for (final engineType in tryOrder) {
+      if (engineType == 'whisper' && whisperModels.isNotEmpty) {
+        // 优先 whisper-small（中文最小可用），其次 large-v3-turbo（质量最优），
+        // 否则取第一个
+        final chosen = whisperModels.firstWhere(
+          (m) => m.id == 'whisper-small',
+          orElse: () => whisperModels.firstWhere(
+            (m) => m.id == 'whisper-large-v3-turbo',
+            orElse: () => whisperModels.first,
+          ),
+        );
+        _asrEngine = WhisperRealtimeAsrEngine(
+          whisperModelId: chosen.id,
+          vadModelPath: vadPath,
+          language: _whisperLanguage(asrConfig?.language ?? 'zh'),
+        );
+        _asrStatusHint = '使用本地 whisper.cpp（${chosen.displayName}）';
+        await _asrEngine!.init();
+        return;
+      }
       if (engineType == 'gguf' && ggufModels.isNotEmpty) {
         // 优先 0.6B（轻量低延迟），否则取第一个
         final chosen = ggufModels.firstWhere(
@@ -204,9 +228,29 @@ class _RecordingScreenState extends ConsumerState<RecordingScreen>
 
     throw StateError(
       '未配置可用的 ASR 引擎。\n'
-      '请在设置中下载 SenseVoice 模型（~239MB，从魔搭社区下载，国内首选），'
-      '或配置云端 ASR',
+      '请在设置中下载 whisper.cpp 模型（推荐 ggml-small.bin ~466MB，'
+      '从 hf-mirror.com 下载），或配置云端 ASR',
     );
+  }
+
+  /// 将 NOTA 语言代码（zh/en/multi）映射为 whisper.cpp 语言代码。
+  ///
+  /// whisper.cpp 支持的语言代码见 whisper.cpp/src/whisper.cpp `whisper_lang_id`：
+  /// - "auto" 自动检测（默认）
+  /// - "zh" 中文，"en" 英文，"ja" 日语，"ko" 韩语 等
+  String _whisperLanguage(String lang) {
+    switch (lang) {
+      case 'zh':
+        return 'zh';
+      case 'en':
+        return 'en';
+      case 'ja':
+        return 'ja';
+      case 'ko':
+        return 'ko';
+      default:
+        return 'auto';
+    }
   }
 
   /// 从 SharedPreferences 读取 ASR 配置（与 settings_screen 逻辑一致）。

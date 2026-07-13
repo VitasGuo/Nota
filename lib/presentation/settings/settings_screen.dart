@@ -51,14 +51,20 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
   final TextEditingController _asrApiKeyController = TextEditingController();
   final TextEditingController _asrModelNameController = TextEditingController();
 
-  /// 本地 ASR 引擎偏好：`sherpa`（默认稳定）/ `gguf`（Qwen3-ASR 质量优）。
-  String _asrLocalEnginePref = 'sherpa';
+  /// 本地 ASR 引擎偏好：`whisper`（默认，v0.9.6 新增，稳定且质量优）/
+  /// `sherpa`（sherpa-onnx 稳定）/ `gguf`（Qwen3-ASR 质量优但可能闪退）。
+  String _asrLocalEnginePref = 'whisper';
 
   // —— GGUF ASR 模型（Qwen3-ASR via llama.cpp mtmd）——
   List<GgufAsrModelInfo> _downloadedGgufModels = [];
   String? _downloadingGgufModelId;
   double _ggufDownloadProgress = 0;
   String? _ggufDownloadStage;
+
+  // —— whisper.cpp ASR 模型（ggml .bin 单文件，v0.9.6 新增）——
+  List<WhisperModelInfo> _downloadedWhisperModels = [];
+  String? _downloadingWhisperModelId;
+  double _whisperDownloadProgress = 0;
 
   // —— VAD 模型 ——
   bool _vadReady = false;
@@ -104,8 +110,9 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
           );
     final downloaded = await AsrModelManager().getDownloadedModels();
     final downloadedGguf = await AsrModelManager().getDownloadedGgufModels();
+    final downloadedWhisper = await AsrModelManager().getDownloadedWhisperModels();
     final vadReady = await AsrModelManager().isVadModelDownloaded();
-    final asrEnginePref = prefs.getString('asr_local_engine_pref') ?? 'sherpa';
+    final asrEnginePref = prefs.getString('asr_local_engine_pref') ?? 'whisper';
 
     // LLM 按功能配置
     final router = LlmTaskRouter();
@@ -128,6 +135,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
         _asrModelNameController.text = asrConfig.modelName ?? '';
         _downloadedModels = downloaded;
         _downloadedGgufModels = downloadedGguf;
+        _downloadedWhisperModels = downloadedWhisper;
         _vadReady = vadReady;
         _asrLocalEnginePref = asrEnginePref;
         _llmConfigs.addAll(llmConfigs);
@@ -214,6 +222,9 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
               children: [
                 _buildSectionTitle('ASR 引擎'),
                 _buildAsrSection(),
+                const SizedBox(height: 24),
+                _buildSectionTitle('whisper.cpp 模型（推荐，稳定本地实时转写）'),
+                _buildWhisperAsrSection(),
                 const SizedBox(height: 24),
                 _buildSectionTitle('Qwen3-ASR GGUF 模型（高质量实时转写）'),
                 _buildGgufAsrSection(),
@@ -326,11 +337,12 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
     );
   }
 
-  /// 本地 ASR 引擎偏好选择（sherpa-onnx 稳定 / GGUF ASR 质量优）。
+  /// 本地 ASR 引擎偏好选择（whisper.cpp 推荐 / sherpa-onnx 稳定 / GGUF ASR 质量优）。
   ///
-  /// sherpa-onnx（SenseVoice/Paraformer/Whisper）为默认，ONNX 运行时移动端
-  /// 成熟稳定；GGUF ASR（Qwen3-ASR via llama.cpp）质量更优但同步 FFI 有阻塞
-  /// 主线程风险。用户已下载对应模型后可在此切换。
+  /// whisper.cpp（ggml 模型，v0.9.6 新增）为默认，移动端成熟稳定且质量优；
+  /// sherpa-onnx（SenseVoice/Paraformer/Whisper）ONNX 运行时稳定；
+  /// GGUF ASR（Qwen3-ASR via llama.cpp）质量最优但同步 FFI 有阻塞主线程风险。
+  /// 用户已下载对应模型后可在此切换。
   Widget _buildLocalAsrEnginePref() {
     return Padding(
       padding: const EdgeInsets.fromLTRB(16, 12, 16, 8),
@@ -341,10 +353,14 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
           labelText: '本地 ASR 引擎',
           isDense: true,
           border: OutlineInputBorder(),
-          helperText: 'sherpa-onnx 稳定（默认） / GGUF ASR 质量优（可能闪退）',
+          helperText: 'whisper.cpp 推荐（默认） / sherpa-onnx 稳定 / GGUF ASR 质量优（可能闪退）',
           helperMaxLines: 2,
         ),
         items: const [
+          DropdownMenuItem(
+            value: 'whisper',
+            child: Text('whisper.cpp（推荐）', overflow: TextOverflow.ellipsis),
+          ),
           DropdownMenuItem(
             value: 'sherpa',
             child: Text('sherpa-onnx（稳定）', overflow: TextOverflow.ellipsis),
@@ -631,6 +647,195 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
         );
       }).toList(),
     );
+  }
+
+  // —— 1a. whisper.cpp ASR 模型管理（ggml .bin 单文件，v0.9.6 新增）——
+
+  /// whisper.cpp ASR 模型管理区域。
+  ///
+  /// whisper.cpp 使用原生 ggml 格式（.bin 单文件），移动端成熟稳定，
+  /// 质量优于 sherpa-onnx Whisper 且比 Qwen3-ASR 更稳定（无同步 FFI 阻塞）。
+  /// 推荐下载 ggml-small.bin（~466MB，中文最小可用）。
+  /// 从 hf-mirror.com 下载（国内网络友好），也支持本地导入。
+  /// 下载后录音界面默认使用此引擎（v0.9.6 起为默认 ASR）。
+  Widget _buildWhisperAsrSection() {
+    final pending = WhisperModels.available
+        .where((m) => !_downloadedWhisperModels.any((d) => d.id == m.id))
+        .toList();
+
+    return _sectionCard([
+      // 说明
+      Padding(
+        padding: const EdgeInsets.fromLTRB(16, 8, 16, 4),
+        child: Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Icon(Icons.info_outline, size: 14, color: AppTheme.textSecondary),
+            const SizedBox(width: 6),
+            Expanded(
+              child: Text(
+                'whisper.cpp 基于 ggml 格式，移动端成熟稳定，质量优且无闪退风险。'
+                '推荐 ggml-small.bin（~466MB，中文最小可用）。从 hf-mirror.com 下载，国内网络友好。',
+                style: TextStyle(fontSize: 11, color: AppTheme.textSecondary),
+              ),
+            ),
+          ],
+        ),
+      ),
+      // 已下载模型
+      ..._downloadedWhisperModels.map((m) => ListTile(
+            dense: true,
+            leading:
+                Icon(Icons.check_circle, color: Colors.green.shade600, size: 20),
+            title: Text(m.displayName, style: const TextStyle(fontSize: 13)),
+            subtitle: Text(
+              '${m.sizeMb.toStringAsFixed(0)}MB · ${m.language}',
+              style: TextStyle(fontSize: 11, color: AppTheme.textSecondary),
+            ),
+            trailing: IconButton(
+              icon: const Icon(Icons.delete_outline, size: 18),
+              tooltip: '删除模型',
+              onPressed: () => _deleteWhisperModel(m.id),
+            ),
+          )),
+      // 下载/导入列表
+      ...pending.map((m) {
+        final isDownloading = _downloadingWhisperModelId == m.id;
+        return ListTile(
+          dense: true,
+          title: Text(m.displayName, style: const TextStyle(fontSize: 13)),
+          subtitle: Text(
+            '${m.sizeMb.toStringAsFixed(0)}MB · ${m.language}',
+            style: TextStyle(fontSize: 11, color: AppTheme.textSecondary),
+          ),
+          trailing: isDownloading
+              ? SizedBox(
+                  width: 24,
+                  height: 24,
+                  child: CircularProgressIndicator(
+                    value: _whisperDownloadProgress > 0
+                        ? _whisperDownloadProgress
+                        : null,
+                    strokeWidth: 2,
+                  ),
+                )
+              : Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    TextButton(
+                      onPressed: () => _downloadWhisperModel(m.id),
+                      child: const Text('下载'),
+                    ),
+                    TextButton(
+                      onPressed: () => _importWhisperModel(m.id),
+                      child: const Text('导入'),
+                    ),
+                  ],
+                ),
+        );
+      }),
+      if (_downloadedWhisperModels.isEmpty && pending.isEmpty)
+        Padding(
+          padding: const EdgeInsets.fromLTRB(16, 4, 16, 12),
+          child: Text(
+            '暂无可用 whisper.cpp 模型',
+            style: TextStyle(fontSize: 13, color: AppTheme.textSecondary),
+          ),
+        ),
+    ]);
+  }
+
+  Future<void> _downloadWhisperModel(String id) async {
+    setState(() {
+      _downloadingWhisperModelId = id;
+      _whisperDownloadProgress = 0;
+    });
+    try {
+      await AsrModelManager().downloadWhisperModel(
+        id,
+        onProgress: (p) {
+          if (mounted) setState(() => _whisperDownloadProgress = p);
+        },
+      );
+      final downloaded = await AsrModelManager().getDownloadedWhisperModels();
+      if (mounted) {
+        setState(() {
+          _downloadedWhisperModels = downloaded;
+          _downloadingWhisperModelId = null;
+        });
+        _showSaved();
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('下载失败: $e'),
+            backgroundColor: Colors.red,
+          ),
+        );
+        setState(() {
+          _downloadingWhisperModelId = null;
+        });
+      }
+    }
+  }
+
+  Future<void> _importWhisperModel(String id) async {
+    try {
+      final success = await AsrModelManager().importWhisperModel(id);
+      if (success) {
+        final downloaded = await AsrModelManager().getDownloadedWhisperModels();
+        if (mounted) {
+          setState(() => _downloadedWhisperModels = downloaded);
+          _showSaved();
+        }
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('导入失败: $e'),
+            backgroundColor: Colors.red,
+          ),
+        );
+      }
+    }
+  }
+
+  Future<void> _deleteWhisperModel(String id) async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('删除模型'),
+        content: const Text('确认删除此 whisper.cpp 模型？此操作不可恢复。'),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: const Text('取消')),
+          TextButton(
+              onPressed: () => Navigator.pop(ctx, true),
+              child: const Text('删除')),
+        ],
+      ),
+    );
+    if (confirmed != true) return;
+
+    try {
+      await AsrModelManager().deleteWhisperModel(id);
+      final downloaded = await AsrModelManager().getDownloadedWhisperModels();
+      if (mounted) {
+        setState(() => _downloadedWhisperModels = downloaded);
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('删除失败: $e'),
+            backgroundColor: Colors.red,
+          ),
+        );
+      }
+    }
   }
 
   // —— 1b. Qwen3-ASR GGUF 模型管理（基于 llama.cpp mtmd）——

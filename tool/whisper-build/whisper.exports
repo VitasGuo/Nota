@@ -1,0 +1,7 @@
+{
+  global:
+    whisper_simple_*;
+    whisper_*;
+  local:
+    *;
+};
