@@ -363,7 +363,7 @@
 
 ---
 
-## #46 whisper.cpp ggml magic header 字节序 — 待真机验证
-- **现象**: v0.9.6 AsrModelManager.validateWhisperModelFile 用 `[0x67, 0x67, 0x6d, 0x6c]`（"ggml" ASCII 大端序）校验 whisper.cpp ggml .bin 模型文件首 4 字节。whisper.cpp 实际 .bin 文件可能使用小端序存储 uint32 magic，需真机测试验证校验是否通过
-- **根因**: ggml 文件格式规范中 magic header 为 `0x67676d6c`（"ggml" ASCII），但文件存储时的字节序取决于格式定义。whisper.cpp 源码 `whisper_model_loader` 读取 magic 时用 `fread` 直接读 4 字节，未做端序转换（ARM arm64-v8a 为小端架构）。若文件以小端序存储（`0x6c 0x6d 0x67 0x67`），当前大端序校验 `[0x67, 0x67, 0x6d, 0x6c]` 会失败，导致下载的合法模型被误判为无效文件并删除
-- **解决**: 待真机测试验证。若校验失败，将 magic header 改为小端序 `[0x6c, 0x6d, 0x67, 0x67]`，或改用 uint32 比较（`bytes.buffer.asByteData().getUint32(0, Endian.little) == 0x67676d6c`）。规律：二进制文件 magic header 校验需注意端序，ARM x86 均为小端架构，文件格式若按主机端序存储则读取时无需转换，但跨平台格式（如 GGUF）可能明确规定大端/小端；校验前查格式规范确认端序约定
+## #46 whisper.cpp ggml magic header 字节序 — 已修复（v0.9.7）
+- **现象**: v0.9.6 AsrModelManager.validateWhisperModelFile 用 `[0x67, 0x67, 0x6d, 0x6c]`（"ggml" ASCII 大端序）校验 whisper.cpp ggml .bin 模型文件首 4 字节。用户反馈下载 whisper 模型后 magic head 不匹配，非有效 ggml 文件
+- **根因**: ggml 格式 magic 为 uint32 `0x67676d6c`（"ggml"），以**小端序**存储（ARM/x86 均为小端）。文件写入时 `fwrite(&magic, sizeof(magic), 1, file)`，uint32 `0x67676d6c` 在小端机器上内存布局为 `6c 6d 67 67`（低位先存）。故文件首 4 字节为 `[0x6c, 0x6d, 0x67, 0x67]`，而非 ASCII 顺序 `[0x67, 0x67, 0x6d, 0x6c]`。原代码误用 ASCII 顺序导致校验失败，下载的合法模型被误判无效删除
+- **解决**: `asr_model_manager.dart` 中 `_whisperGgmlMagic` 从 `[0x67, 0x67, 0x6d, 0x6c]` 改为 `[0x6c, 0x6d, 0x67, 0x67]`（小端序）。规律：C 代码中 `uint32_t magic = 0x67676d6c; fwrite(&magic, ...)` 在小端机器上写入的字节顺序是低位先存（`6c 6d 67 67`），Dart 侧校验文件首 4 字节必须按小端序匹配；不能想当然地用 ASCII 字符顺序（"ggml" → `67 67 6d 6c`），因为 uint32 的内存布局取决于 CPU 端序而非字符顺序

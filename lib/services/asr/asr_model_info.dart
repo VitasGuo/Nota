@@ -140,9 +140,9 @@ class AsrModels {
       language: 'zh',
       supportsHotwords: true,
       description: '阿里 Paraformer 中文模型 int8 量化版，原生支持热词 boosting。'
-          '从 hf-mirror.com 下载单文件，国内网络友好',
-      hfRepo: 'csukuangfj/sherpa-onnx-paraformer-zh-2023-03-28',
-      hfFiles: ['model.int8.onnx', 'tokens.txt'],
+          '从魔搭社区（ModelScope）下载，国内网络最友好',
+      modelscopeRepo: 'pengzhendong/sherpa-onnx-paraformer-zh',
+      modelscopeFiles: ['model.int8.onnx', 'tokens.txt'],
     ),
   ];
 
@@ -248,11 +248,11 @@ class GgufAsrModelInfo {
 class GgufAsrModels {
   GgufAsrModels._();
 
-  /// HF 镜像前缀（国内网络友好）。
+  /// 魔搭社区（ModelScope）API 前缀（国内网络最友好）。
   ///
-  /// 使用 hf-mirror.com 替代 huggingface.co 直连，避免国内访问超时。
-  /// 镜像与官方仓库文件完全一致，仅域名替换。
-  static const String _hfMirror = 'https://hf-mirror.com';
+  /// 使用魔搭替代 huggingface.co 直连，避免国内访问超时。
+  /// URL 格式：`{prefix}/{repo}/repo?Revision=master&FilePath={file}`
+  static const String _modelScope = 'https://www.modelscope.cn/api/v1/models';
 
   /// 预置 GGUF ASR 模型清单。
   ///
@@ -268,13 +268,13 @@ class GgufAsrModels {
       mainFile: GgufModelFile(
         filename: 'Qwen3-ASR-1.7B-Q8_0.gguf',
         downloadUrl:
-            '$_hfMirror/ggml-org/Qwen3-ASR-1.7B-GGUF/resolve/main/Qwen3-ASR-1.7B-Q8_0.gguf',
+            '$_modelScope/ggml-org/Qwen3-ASR-1.7B-GGUF/repo?Revision=master&FilePath=Qwen3-ASR-1.7B-Q8_0.gguf',
         sizeBytes: 2165034944,
       ),
       mmprojFile: GgufModelFile(
         filename: 'mmproj-Qwen3-ASR-1.7B-Q8_0.gguf',
         downloadUrl:
-            '$_hfMirror/ggml-org/Qwen3-ASR-1.7B-GGUF/resolve/main/mmproj-Qwen3-ASR-1.7B-Q8_0.gguf',
+            '$_modelScope/ggml-org/Qwen3-ASR-1.7B-GGUF/repo?Revision=master&FilePath=mmproj-Qwen3-ASR-1.7B-Q8_0.gguf',
         sizeBytes: 355709344,
       ),
     ),
@@ -287,13 +287,13 @@ class GgufAsrModels {
       mainFile: GgufModelFile(
         filename: 'Qwen3-ASR-0.6B-Q8_0.gguf',
         downloadUrl:
-            '$_hfMirror/ggml-org/Qwen3-ASR-0.6B-GGUF/resolve/main/Qwen3-ASR-0.6B-Q8_0.gguf',
+            '$_modelScope/ggml-org/Qwen3-ASR-0.6B-GGUF/repo?Revision=master&FilePath=Qwen3-ASR-0.6B-Q8_0.gguf',
         sizeBytes: 804749248,
       ),
       mmprojFile: GgufModelFile(
         filename: 'mmproj-Qwen3-ASR-0.6B-Q8_0.gguf',
         downloadUrl:
-            '$_hfMirror/ggml-org/Qwen3-ASR-0.6B-GGUF/resolve/main/mmproj-Qwen3-ASR-0.6B-Q8_0.gguf',
+            '$_modelScope/ggml-org/Qwen3-ASR-0.6B-GGUF/repo?Revision=master&FilePath=mmproj-Qwen3-ASR-0.6B-Q8_0.gguf',
         sizeBytes: 214392480,
       ),
     ),

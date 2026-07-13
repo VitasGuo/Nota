@@ -3,9 +3,28 @@
 ## 项目目标
 NOTA - Note with ASR，私人 AI 笔记软件。基于 Flutter，集成 ai_router_module 统一管理多 AI 平台，聚焦"录音 → 转写 → 笔记"场景。派生自 xiaop v1.4.1（AI 情感陪伴助手），继承其多 AI 提供商、主题等基础设施，后续将向笔记 + 语音识别（ASR）方向演进。
 
-## 当前版本: v0.9.6
+## 当前版本: v0.9.7
 
 ## 版本历史
+
+### v0.9.7 (2026-07-14) - Qwen3-0.6B 本地翻译 + 下载源全面迁移魔搭 + whisper magic 修复
+- **目标**：① 新增 Qwen3-0.6B 作为本地文本 LLM 模型（非 ASR），打通翻译走本地 llama.cpp 路径；② 修复 whisper.cpp ggml 模型 magic header 校验失败（字节序问题）；③ 所有模型下载源尽可能迁移到魔搭社区（ModelScope），国内网络最友好
+- **Qwen3-0.6B 本地文本 LLM**（`llm_model_info.dart` + `settings_screen.dart`）
+  - GgufLlmModels.available 新增 Qwen3-0.6B（Q8_0，639MB，ChatML 模板，魔搭 `qwen/Qwen3-0.6B-GGUF` 下载源）
+  - 设置页 LLM 配置"本地"分支：替换过时的"开发中"提示为真正的本地模型选择 UI（已下载列表 RadioListTile + 下载/导入/删除入口），用户可为翻译/纪要/纠错/笔记整理各自选本地模型
+  - 翻译走本地 llama.cpp 架构已打通（v0.6.0 LocalLlmEngine + LlmTaskRouter local 分支），本版本补齐设置页 UI，用户可在"LLM 按功能配置"→翻译→本地→选 Qwen3-0.6B
+  - LocalLlmEngine 对 ChatML 模板自动追加 /no_think（翻译低温度 0.1 + thinking off 符合要求）
+- **whisper.cpp ggml magic header 修复**（`asr_model_manager.dart`，traps.md #46）
+  - 根因：ggml 格式 magic 为 uint32 `0x67676d6c`，小端序存储，文件首 4 字节为 `[0x6c, 0x6d, 0x67, 0x67]`，原代码误用 ASCII 顺序 `[0x67, 0x67, 0x6d, 0x6c]`
+  - 修复：`_whisperGgmlMagic` 改为 `[0x6c, 0x6d, 0x67, 0x67]`
+- **下载源迁移魔搭**（`asr_model_info.dart` + `llm_model_info.dart`）
+  - GGUF ASR（Qwen3-ASR 1.7B/0.6B）：hf-mirror → 魔搭 `ggml-org/Qwen3-ASR-*-GGUF`
+  - GGUF 文本 LLM（Qwen2.5-1.5B/3B + Llama-3.2-3B）：hf-mirror → 魔搭 `Qwen/Qwen2.5-*-GGUF` + `unsloth/Llama-3.2-3B-Instruct-GGUF`
+  - sherpa-onnx paraformer-zh：hf-mirror（csukuangfj HF 仓库）→ 魔搭 `pengzhendong/sherpa-onnx-paraformer-zh`
+  - 保留 hf-mirror：whisper.cpp ggml 模型（魔搭无标准版 tiny/small/large-v3-turbo）
+  - 保留 GitHub tar.bz2：sherpa-onnx whisper-medium/large-v3-turbo（魔搭文件名不同 encoder/decoder 分离结构，非首选引擎）
+- **验证**：`flutter analyze`（10 个 info，0 error/warning）；`flutter build apk --release` → 成功（66.2s，137.7MB）；版本号 0.9.6+1 → 0.9.7+1
+- **待真机测试**：whisper.cpp 模型下载（magic header 校验是否通过）+ Qwen3-0.6B 本地翻译效果 + 魔搭下载速度
 
 ### v0.9.6 (2026-07-14) - 引入 whisper.cpp 作为默认本地 ASR 引擎
 - **目标**：解决 Qwen3-ASR（llama.cpp mtmd 接口）同步 FFI 闪退问题，引入 whisper.cpp 作为专用 ASR 引擎替代 llama.cpp mtmd，whisper.cpp 移动端成熟稳定且质量优。llama.cpp 保留用于本地文本 LLM 推理（翻译/纠错/纪要，未来跑 Qwen3 0.6B）

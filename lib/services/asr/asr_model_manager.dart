@@ -656,11 +656,12 @@ class AsrModelManager {
   // whisper.cpp ASR 模型管理（ggml .bin 单文件格式）
   // ==========================================================================
 
-  /// whisper.cpp ggml 模型 magic header：`ggml`（4 字节 0x67 0x67 0x6d 0x6c）。
+  /// whisper.cpp ggml 模型 magic header：uint32 `0x67676d6c`（"ggml"）。
   ///
-  /// whisper.cpp 模型文件首 4 字节必须为此 magic，否则不是有效 ggml 模型。
-  /// 参考：whisper.cpp `whisper_model_loader` 中 `magic = ggml_hash("ggml")`。
-  static const List<int> _whisperGgmlMagic = [0x67, 0x67, 0x6d, 0x6c];
+  /// ggml 格式文件首 4 字节为 uint32 `0x67676d6c`（"ggml"），以小端序存储
+  /// （ARM/x86 均为小端），故文件首 4 字节为 `[0x6c, 0x6d, 0x67, 0x67]`，
+  /// 而非 ASCII 顺序 `[0x67, 0x67, 0x6d, 0x6c]`（traps.md #46）。
+  static const List<int> _whisperGgmlMagic = [0x6c, 0x6d, 0x67, 0x67];
 
   /// 返回 whisper.cpp 模型目录 `{docsDir}/asr_models/{modelId}/`，不存在则创建。
   ///

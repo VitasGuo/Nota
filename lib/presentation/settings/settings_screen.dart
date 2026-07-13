@@ -19,6 +19,8 @@ import 'package:nota/services/asr/asr_model_info.dart';
 import 'package:nota/services/asr/asr_model_manager.dart';
 import 'package:nota/services/llm/ai_providers.dart';
 import 'package:nota/services/llm/llm_engine.dart';
+import 'package:nota/services/llm/llm_model_info.dart';
+import 'package:nota/services/llm/llm_model_manager.dart';
 import 'package:nota/services/llm/llm_task_router.dart';
 
 /// 设置界面 SettingsScreen（Task 22 改造）。
@@ -66,6 +68,11 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
   String? _downloadingWhisperModelId;
   double _whisperDownloadProgress = 0;
 
+  // —— 本地 LLM 模型（GGUF 文本 LLM via llama.cpp，v0.9.7 新增）——
+  List<GgufLlmModelInfo> _downloadedLlmModels = [];
+  String? _downloadingLlmModelId;
+  double _llmDownloadProgress = 0;
+
   // —— VAD 模型 ——
   bool _vadReady = false;
 
@@ -111,6 +118,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
     final downloaded = await AsrModelManager().getDownloadedModels();
     final downloadedGguf = await AsrModelManager().getDownloadedGgufModels();
     final downloadedWhisper = await AsrModelManager().getDownloadedWhisperModels();
+    final downloadedLlm = await LlmModelManager().getDownloadedModels();
     final vadReady = await AsrModelManager().isVadModelDownloaded();
     final asrEnginePref = prefs.getString('asr_local_engine_pref') ?? 'whisper';
 
@@ -136,6 +144,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
         _downloadedModels = downloaded;
         _downloadedGgufModels = downloadedGguf;
         _downloadedWhisperModels = downloadedWhisper;
+        _downloadedLlmModels = downloadedLlm;
         _vadReady = vadReady;
         _asrLocalEnginePref = asrEnginePref;
         _llmConfigs.addAll(llmConfigs);
@@ -1089,7 +1098,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
                 if (config.engineType == LlmEngineType.cloud)
                   _buildCloudLlmConfig(task, config)
                 else
-                  _buildLocalLlmHint(),
+                  _buildLocalLlmConfig(task, config),
                 const SizedBox(height: 8),
                 _buildAdvancedParams(task, config),
               ],
@@ -1134,26 +1143,191 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
     );
   }
 
-  Widget _buildLocalLlmHint() {
-    return Container(
-      padding: const EdgeInsets.all(12),
-      decoration: BoxDecoration(
-        color: AppTheme.accentColor.withValues(alpha: 0.1),
-        borderRadius: BorderRadius.circular(8),
-      ),
-      child: Row(
-        children: [
-          Icon(Icons.construction, size: 16, color: AppTheme.accentColor),
-          const SizedBox(width: 8),
-          Expanded(
-            child: Text(
-              '本地 LLM 引擎尚在开发中（llama.cpp FFI），暂时请使用云端',
-              style: TextStyle(fontSize: 13, color: AppTheme.accentColor),
-            ),
+  /// 本地 LLM 引擎配置（v0.9.7：llama.cpp FFI 已打通，可选/下载/导入 GGUF 模型）。
+  ///
+  /// 显示已下载的本地文本 LLM 模型，用户可选择一个用于当前任务（翻译/纪要等）。
+  /// 支持下载预置模型（Qwen3-0.6B 首选，魔搭源）、导入本地 .gguf 文件、删除模型。
+  Widget _buildLocalLlmConfig(LlmTaskType task, LlmConfig config) {
+    final currentModel = config.modelName;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        // 说明
+        Container(
+          padding: const EdgeInsets.all(10),
+          decoration: BoxDecoration(
+            color: AppTheme.accentColor.withValues(alpha: 0.08),
+            borderRadius: BorderRadius.circular(8),
           ),
-        ],
-      ),
+          child: Row(
+            children: [
+              Icon(Icons.memory, size: 16, color: AppTheme.accentColor),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Text(
+                  '本地 llama.cpp 推理，离线可用。翻译推荐 Qwen3-0.6B（~640MB）',
+                  style: TextStyle(fontSize: 12, color: AppTheme.textSecondary),
+                ),
+              ),
+            ],
+          ),
+        ),
+        const SizedBox(height: 8),
+        // 已下载模型列表
+        if (_downloadedLlmModels.isEmpty)
+          Padding(
+            padding: const EdgeInsets.symmetric(vertical: 8),
+            child: Text(
+              '暂无已下载本地模型，请在下方下载',
+              style: TextStyle(fontSize: 13, color: AppTheme.textSecondary),
+            ),
+          )
+        else
+          ..._downloadedLlmModels.map((m) => RadioListTile<String>(
+                dense: true,
+                value: m.id,
+                groupValue: currentModel,
+                title: Text(m.displayName, style: const TextStyle(fontSize: 14)),
+                subtitle: Text(m.description,
+                    style: TextStyle(fontSize: 11, color: AppTheme.textSecondary)),
+                onChanged: (v) => _updateLlmConfig(
+                    task, config.copyWith(modelName: v)),
+              )),
+        // 自定义导入模型提示
+        FutureBuilder<List<({String modelId, String path, String filename})>>(
+          future: LlmModelManager().getCustomModels(),
+          builder: (context, snapshot) {
+            if (!snapshot.hasData || snapshot.data!.isEmpty) {
+              return const SizedBox.shrink();
+            }
+            return Column(
+              children: snapshot.data!.map((m) => RadioListTile<String>(
+                dense: true,
+                value: m.modelId,
+                groupValue: currentModel,
+                title: Text(m.filename, style: const TextStyle(fontSize: 14)),
+                subtitle: Text('自定义导入',
+                    style: TextStyle(fontSize: 11, color: AppTheme.textSecondary)),
+                onChanged: (v) => _updateLlmConfig(
+                    task, config.copyWith(modelName: v)),
+              )).toList(),
+            );
+          },
+        ),
+        const Divider(height: 1),
+        // 下载 / 导入入口
+        ...GgufLlmModels.available.map((m) {
+          final downloaded = _downloadedLlmModels.any((d) => d.id == m.id);
+          if (downloaded) return const SizedBox.shrink();
+          final downloading = _downloadingLlmModelId == m.id;
+          return ListTile(
+            dense: true,
+            leading: Icon(
+              downloading ? Icons.downloading : Icons.download,
+              size: 20,
+              color: AppTheme.accentColor,
+            ),
+            title: Text('下载 ${m.displayName}',
+                style: const TextStyle(fontSize: 13)),
+            subtitle: downloading
+                ? LinearProgressIndicator(
+                    value: _llmDownloadProgress > 0
+                        ? _llmDownloadProgress
+                        : null,
+                    backgroundColor: AppTheme.accentColor.withValues(alpha: 0.2),
+                  )
+                : Text(m.description,
+                    style: TextStyle(fontSize: 11, color: AppTheme.textSecondary)),
+            trailing: downloading
+                ? Text('${(_llmDownloadProgress * 100).round()}%',
+                    style: TextStyle(fontSize: 12, color: AppTheme.accentColor))
+                : null,
+            onTap: downloading ? null : () => _downloadLlmModel(m.id),
+          );
+        }),
+        ListTile(
+          dense: true,
+          leading: Icon(Icons.file_upload_outlined,
+              size: 20, color: AppTheme.accentColor),
+          title: const Text('导入本地 .gguf 文件', style: TextStyle(fontSize: 13)),
+          subtitle: Text('从手机存储选择任意 GGUF 文本模型',
+              style: TextStyle(fontSize: 11, color: AppTheme.textSecondary)),
+          onTap: () => _importLlmModel(),
+        ),
+        // 删除已下载模型
+        if (_downloadedLlmModels.isNotEmpty)
+          ExpansionTile(
+            tilePadding: EdgeInsets.zero,
+            dense: true,
+            title: Text('删除模型',
+                style: TextStyle(fontSize: 13, color: AppTheme.textSecondary)),
+            children: _downloadedLlmModels
+                .map((m) => ListTile(
+                      dense: true,
+                      leading: const Icon(Icons.delete_outline,
+                          size: 18, color: Colors.red),
+                      title: Text(m.displayName,
+                          style: const TextStyle(fontSize: 13)),
+                      onTap: () => _deleteLlmModel(m.id),
+                    ))
+                .toList(),
+          ),
+      ],
     );
+  }
+
+  Future<void> _downloadLlmModel(String modelId) async {
+    setState(() {
+      _downloadingLlmModelId = modelId;
+      _llmDownloadProgress = 0;
+    });
+    try {
+      await LlmModelManager().downloadModel(modelId, onProgress: (p) {
+        if (mounted) setState(() => _llmDownloadProgress = p);
+      });
+      final downloaded = await LlmModelManager().getDownloadedModels();
+      if (mounted) {
+        setState(() {
+          _downloadedLlmModels = downloaded;
+          _downloadingLlmModelId = null;
+          _llmDownloadProgress = 0;
+        });
+        _showSaved();
+      }
+    } catch (e) {
+      if (mounted) {
+        setState(() => _downloadingLlmModelId = null);
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('下载失败: $e')),
+        );
+      }
+    }
+  }
+
+  Future<void> _importLlmModel() async {
+    try {
+      final modelId = await LlmModelManager().importCustomModel();
+      if (!mounted) return;
+      setState(() {});
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('已导入模型: $modelId')),
+      );
+    } catch (e) {
+      if (e.toString().contains('取消选择')) return;
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('导入失败: $e')),
+        );
+      }
+    }
+  }
+
+  Future<void> _deleteLlmModel(String modelId) async {
+    await LlmModelManager().deleteModel(modelId);
+    final downloaded = await LlmModelManager().getDownloadedModels();
+    if (mounted) {
+      setState(() => _downloadedLlmModels = downloaded);
+    }
   }
 
   Widget _buildAdvancedParams(LlmTaskType task, LlmConfig config) {

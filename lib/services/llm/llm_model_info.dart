@@ -3,8 +3,9 @@
 // GGUF 文本 LLM 模型信息与预置清单。
 //
 // 用于 [LlmModelManager] 的下载/导入/切换，供 [LocalLlmEngine] 加载推理。
-// 预置模型聚焦移动端可运行的小型 instruct 模型（1.5B-3B，Q4/Q5 量化），
-// 中文场景推荐 Qwen2.5 系列，英文场景推荐 Llama-3.2 系列。
+// 预置模型聚焦移动端可运行的小型 instruct 模型（0.6B-3B，Q4/Q5/Q8 量化），
+// 中文场景推荐 Qwen3/Qwen2.5 系列，英文场景推荐 Llama-3.2 系列。
+// v0.9.7 新增 Qwen3-0.6B（魔搭下载源，Q8_0），适合本地翻译。
 
 /// 单个 GGUF 文本 LLM 模型文件描述。
 class GgufLlmModelFile {
@@ -87,18 +88,36 @@ enum ChatTemplateType {
 class GgufLlmModels {
   GgufLlmModels._();
 
-  /// HuggingFace 国内镜像。
-  static const String hfMirror = 'https://hf-mirror.com';
+  /// 魔搭社区（ModelScope）API 前缀（国内网络最友好）。
+  ///
+  /// 使用魔搭替代 huggingface.co 直连，避免国内访问超时。
+  /// URL 格式：`{prefix}/{repo}/repo?Revision=master&FilePath={file}`
+  static const String _modelScope = 'https://www.modelscope.cn/api/v1/models';
 
   /// 预置模型列表。
   static const List<GgufLlmModelInfo> available = [
+    // —— Qwen3-0.6B（v0.9.7 新增，魔搭下载源，本地翻译首选）——
+    GgufLlmModelInfo(
+      id: 'qwen3-0.6b',
+      displayName: 'Qwen3-0.6B (Q8_0)',
+      file: GgufLlmModelFile(
+        filename: 'Qwen3-0.6B-Q8_0.gguf',
+        downloadUrl:
+            '$_modelScope/qwen/Qwen3-0.6B-GGUF/repo?Revision=master&FilePath=Qwen3-0.6B-Q8_0.gguf',
+        sizeBytes: 670320640, // ~639MB
+      ),
+      recommendedNCtx: 2048,
+      recommendedNThreads: 4,
+      chatTemplate: ChatTemplateType.chatml,
+      description: 'Qwen3 系列最小模型，中文友好，适合本地翻译。约 640MB。',
+    ),
     GgufLlmModelInfo(
       id: 'qwen2.5-1.5b-instruct',
       displayName: 'Qwen2.5-1.5B-Instruct (Q5_K_M)',
       file: GgufLlmModelFile(
         filename: 'qwen2.5-1.5b-instruct-q5_k_m.gguf',
         downloadUrl:
-            '$hfMirror/Qwen/Qwen2.5-1.5B-Instruct-GGUF/resolve/main/qwen2.5-1.5b-instruct-q5_k_m.gguf',
+            '$_modelScope/Qwen/Qwen2.5-1.5B-Instruct-GGUF/repo?Revision=master&FilePath=qwen2.5-1.5b-instruct-q5_k_m.gguf',
         sizeBytes: 1143141184, // ~1.06GB
       ),
       recommendedNCtx: 2048,
@@ -112,7 +131,7 @@ class GgufLlmModels {
       file: GgufLlmModelFile(
         filename: 'qwen2.5-3b-instruct-q5_k_m.gguf',
         downloadUrl:
-            '$hfMirror/Qwen/Qwen2.5-3B-Instruct-GGUF/resolve/main/qwen2.5-3b-instruct-q5_k_m.gguf',
+            '$_modelScope/Qwen/Qwen2.5-3B-Instruct-GGUF/repo?Revision=master&FilePath=qwen2.5-3b-instruct-q5_k_m.gguf',
         sizeBytes: 2280161280, // ~2.12GB
       ),
       recommendedNCtx: 2048,
@@ -126,7 +145,7 @@ class GgufLlmModels {
       file: GgufLlmModelFile(
         filename: 'Llama-3.2-3B-Instruct-Q4_K_M.gguf',
         downloadUrl:
-            '$hfMirror/lmstudio-community/Llama-3.2-3B-Instruct-GGUF/resolve/main/Llama-3.2-3B-Instruct-Q4_K_M.gguf',
+            '$_modelScope/unsloth/Llama-3.2-3B-Instruct-GGUF/repo?Revision=master&FilePath=Llama-3.2-3B-Instruct-Q4_K_M.gguf',
         sizeBytes: 2019371904, // ~1.88GB
       ),
       recommendedNCtx: 2048,
