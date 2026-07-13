@@ -757,15 +757,30 @@ class AsrModelManager {
 
     final outPath = p.join(dir.path, info.filename);
 
-    await _dio.download(
-      info.downloadUrl,
-      outPath,
-      onReceiveProgress: (received, total) {
-        if (total > 0 && onProgress != null) {
-          onProgress(received / total);
-        }
-      },
-    );
+    try {
+      await _dio.download(
+        info.downloadUrl,
+        outPath,
+        onReceiveProgress: (received, total) {
+          if (total > 0 && onProgress != null) {
+            onProgress(received / total);
+          }
+        },
+      );
+    } catch (e) {
+      // 清理残留文件
+      try {
+        await File(outPath).delete();
+      } catch (_) {}
+      // hf-mirror 302 重定向到 xethub.hf.co（国内被墙）会导致 403/连接错误
+      if (e.toString().contains('403') || e.toString().contains('302')) {
+        throw StateError(
+          '下载失败（$e）：hf-mirror CDN 可能拒绝下载。\n'
+          '请尝试：1. 下载 whisper-large-v3（魔搭源）；2. 手动从 hf-mirror.com 下载后导入',
+        );
+      }
+      rethrow;
+    }
 
     // 校验 magic header
     if (!await validateWhisperModelFile(outPath)) {

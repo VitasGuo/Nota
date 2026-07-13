@@ -374,25 +374,24 @@ class WhisperModelInfo {
 class WhisperModels {
   WhisperModels._();
 
-  /// HF 镜像前缀（国内网络友好）。
+  /// HF 镜像前缀（国内网络友好，但 Xet 文件可能 302 到被墙的 CDN）。
   static const String _hfMirror = 'https://hf-mirror.com';
+
+  /// 魔搭社区 API 前缀（国内网络最友好，whisper-large-v3 备选源）。
+  static const String _modelScope = 'https://www.modelscope.cn/api/v1/models';
 
   /// 预置 whisper.cpp ggml 模型清单。
   ///
   /// 按推荐度排序：
-  /// - ggml-tiny.bin（~39MB，英文，测试用，体积最小）
-  /// - ggml-small.bin（~466MB，多语言，中文最小可用，推荐首选）
-  /// - ggml-large-v3-turbo-q5_0.bin（~547MB，多语言，质量最优，存储空间充裕首选）
+  /// - ggml-small.bin（~466MB，多语言，中文最小可用，推荐首选，hf-mirror 源）
+  /// - ggml-large-v3-turbo-q5_0.bin（~547MB，多语言，质量最优，hf-mirror 源）
+  /// - ggml-tiny.bin（~39MB，英文，测试用，体积最小，hf-mirror 源）
+  /// - whisper-large-v3（~3.1GB，多语言，魔搭源，hf-mirror 403 时的备选）
+  ///
+  /// 注意：hf-mirror 对 Xet 存储文件会 302 重定向到 cas-bridge.xethub.hf.co
+  /// （国内被墙返回 403）。tiny/small/large-v3-turbo 均走 hf-mirror，如遇 403
+  /// 请改用魔搭源的 large-v3，或手动下载后导入（traps.md #47）。
   static const List<WhisperModelInfo> available = [
-    WhisperModelInfo(
-      id: 'whisper-tiny',
-      displayName: 'Whisper Tiny (39MB, 英文, 测试用)',
-      filename: 'ggml-tiny.bin',
-      downloadUrl: '$_hfMirror/ggerganov/whisper.cpp/resolve/main/ggml-tiny.bin',
-      sizeBytes: 39 * 1024 * 1024,
-      language: 'en',
-      description: 'whisper.cpp 最小模型，仅英文，用于测试引擎是否正常工作',
-    ),
     WhisperModelInfo(
       id: 'whisper-small',
       displayName: 'Whisper Small (466MB, 多语言, 中文首选)',
@@ -412,6 +411,26 @@ class WhisperModels {
       language: 'multi',
       description: 'whisper.cpp Large v3 Turbo Q5_0 量化版，质量最优，'
           '存储空间充裕时首选',
+    ),
+    WhisperModelInfo(
+      id: 'whisper-tiny',
+      displayName: 'Whisper Tiny (39MB, 英文, 测试用)',
+      filename: 'ggml-tiny.bin',
+      downloadUrl: '$_hfMirror/ggerganov/whisper.cpp/resolve/main/ggml-tiny.bin',
+      sizeBytes: 39 * 1024 * 1024,
+      language: 'en',
+      description: 'whisper.cpp 最小模型，仅英文，用于测试引擎是否正常工作',
+    ),
+    WhisperModelInfo(
+      id: 'whisper-large-v3',
+      displayName: 'Whisper Large v3 (3.1GB, 多语言, 魔搭源, 备选)',
+      filename: 'ggml-model.bin',
+      downloadUrl:
+          '$_modelScope/LLM-Research/whisper-large-v3-ggml/repo?Revision=master&FilePath=ggml-model.bin',
+      sizeBytes: 3100 * 1024 * 1024,
+      language: 'multi',
+      description: 'whisper.cpp Large v3 全精度模型（魔搭下载源），体积较大。'
+          '当 hf-mirror 下载 tiny/small/turbo 遇 403 时可用此模型',
     ),
   ];
 

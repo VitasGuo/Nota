@@ -24,7 +24,11 @@ NOTA - Note with ASR，私人 AI 笔记软件。基于 Flutter，集成 ai_route
   - 保留 hf-mirror：whisper.cpp ggml 模型（魔搭无标准版 tiny/small/large-v3-turbo）
   - 保留 GitHub tar.bz2：sherpa-onnx whisper-medium/large-v3-turbo（魔搭文件名不同 encoder/decoder 分离结构，非首选引擎）
 - **验证**：`flutter analyze`（10 个 info，0 error/warning）；`flutter build apk --release` → 成功（66.2s，137.7MB）；版本号 0.9.6+1 → 0.9.7+1
-- **待真机测试**：whisper.cpp 模型下载（magic header 校验是否通过）+ Qwen3-0.6B 本地翻译效果 + 魔搭下载速度
+- **v0.9.7 增量修复**（翻译 UI 提示 + whisper 403 处理，traps.md #47）
+  - `recording_screen.dart` 翻译状态三态 UI：新增 `_translatingIndices` Set 跟踪翻译中段落（含模型加载阶段）；`_buildSegmentCard` 翻译区域三态显示——翻译中（CircularProgressIndicator + "正在翻译..."）/ 流式译文 / 失败（⚠ 前缀 + errorContainer 红色背景）；`_translateSegment` 添加 SnackBar 错误提示 + finally 清理状态。解决用户"录音界面怎么知道本地 GGUF 正在加载"的疑问
+  - `asr_model_manager.dart` downloadWhisperModel 403 错误处理：try-catch 包裹 _dio.download，捕获 403/302（hf-mirror Xet CDN 被墙）时删除残留文件并抛出友好提示（引导下载魔搭源或手动导入）
+  - `asr_model_info.dart` WhisperModels 新增 `whisper-large-v3`（魔搭源 `LLM-Research/whisper-large-v3-ggml`，ggml-model.bin，3.1GB）作为 hf-mirror 403 时的备选下载源
+- **待真机测试**：whisper.cpp 模型下载（magic header 校验 + 403 是否出现 + 魔搭 large-v3 备选是否可用）+ Qwen3-0.6B 本地翻译效果（录音界面翻译状态提示是否正常）+ 魔搭下载速度
 
 ### v0.9.6 (2026-07-14) - 引入 whisper.cpp 作为默认本地 ASR 引擎
 - **目标**：解决 Qwen3-ASR（llama.cpp mtmd 接口）同步 FFI 闪退问题，引入 whisper.cpp 作为专用 ASR 引擎替代 llama.cpp mtmd，whisper.cpp 移动端成熟稳定且质量优。llama.cpp 保留用于本地文本 LLM 推理（翻译/纠错/纪要，未来跑 Qwen3 0.6B）

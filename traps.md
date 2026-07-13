@@ -367,3 +367,13 @@
 - **现象**: v0.9.6 AsrModelManager.validateWhisperModelFile 用 `[0x67, 0x67, 0x6d, 0x6c]`（"ggml" ASCII 大端序）校验 whisper.cpp ggml .bin 模型文件首 4 字节。用户反馈下载 whisper 模型后 magic head 不匹配，非有效 ggml 文件
 - **根因**: ggml 格式 magic 为 uint32 `0x67676d6c`（"ggml"），以**小端序**存储（ARM/x86 均为小端）。文件写入时 `fwrite(&magic, sizeof(magic), 1, file)`，uint32 `0x67676d6c` 在小端机器上内存布局为 `6c 6d 67 67`（低位先存）。故文件首 4 字节为 `[0x6c, 0x6d, 0x67, 0x67]`，而非 ASCII 顺序 `[0x67, 0x67, 0x6d, 0x6c]`。原代码误用 ASCII 顺序导致校验失败，下载的合法模型被误判无效删除
 - **解决**: `asr_model_manager.dart` 中 `_whisperGgmlMagic` 从 `[0x67, 0x67, 0x6d, 0x6c]` 改为 `[0x6c, 0x6d, 0x67, 0x67]`（小端序）。规律：C 代码中 `uint32_t magic = 0x67676d6c; fwrite(&magic, ...)` 在小端机器上写入的字节顺序是低位先存（`6c 6d 67 67`），Dart 侧校验文件首 4 字节必须按小端序匹配；不能想当然地用 ASCII 字符顺序（"ggml" → `67 67 6d 6c`），因为 uint32 的内存布局取决于 CPU 端序而非字符顺序
+
+---
+
+## #47 hf-mirror.com Xet 存储文件下载 403 — whisper.cpp ggml 模型下载失败
+- **现象**: v0.9.7 用户反馈从 hf-mirror.com 下载 whisper.cpp ggml 模型（tiny/small/large-v3-turbo）报 403 错误。Dio download 抛出包含 `403` 或 `302` 的异常
+- **根因**: hf-mirror.com 对使用 HuggingFace Xet 存储的文件（whisper.cpp 仓库 `ggerganov/whisper.cpp` 的 ggml .bin 文件已迁移到 Xet 存储）返回 302 重定向到 `cas-bridge.xethub.hf.co`（HuggingFace Xet CDN）。该 CDN 域名在国内被墙，连接超时/拒绝，Dio 最终收到 403 或连接错误。非 Xet 存储的文件（如部分老仓库）仍走 hf-mirror.com 直连不受影响
+- **解决**:
+  - `asr_model_manager.dart` 的 `downloadWhisperModel` 用 try-catch 包裹 `_dio.download`，捕获到 403/302 时删除残留文件并抛出友好错误提示（引导用户下载魔搭源或手动导入）
+  - `asr_model_info.dart` 的 `WhisperModels.available` 新增 `whisper-large-v3`（魔搭源 `LLM-Research/whisper-large-v3-ggml`，`ggml-model.bin`，3.1GB），作为 hf-mirror 403 时的备选下载源
+  - 规律：hf-mirror.com 镜像对 Xet 存储文件无法直接代理（302 到 xethub.hf.co 被墙），国内下载模型应优先用魔搭社区（ModelScope）源；若魔搭无对应模型，可手动从 hf-mirror.com 网页下载后通过"导入"功能加载

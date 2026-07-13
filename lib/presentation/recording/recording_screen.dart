@@ -62,6 +62,7 @@ class _RecordingScreenState extends ConsumerState<RecordingScreen>
   // 转写段落实时列表（UI 展示用，含临时翻译状态）
   final List<TranscriptSegment> _segments = [];
   final List<String?> _partialTranslations = []; // 流式翻译中间态
+  final Set<int> _translatingIndices = {}; // 正在翻译的段落索引（含模型加载阶段）
 
   // 正在聆听/转写指示
   bool _isListening = false; // VAD onSpeechStart 触发
@@ -453,10 +454,18 @@ class _RecordingScreenState extends ConsumerState<RecordingScreen>
   Future<void> _translateSegment(int index) async {
     if (index < 0 || index >= _segments.length) return;
 
+    if (mounted) setState(() => _translatingIndices.add(index));
     try {
       final engine = await LlmTaskRouter().getEngine(LlmTaskType.translation);
       if (engine == null) {
-        // 本地引擎未实现，静默跳过
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text('翻译引擎未配置，请在设置中配置翻译功能'),
+              duration: Duration(seconds: 3),
+            ),
+          );
+        }
         return;
       }
 
@@ -495,10 +504,24 @@ class _RecordingScreenState extends ConsumerState<RecordingScreen>
         },
         onError: (err) {
           debugPrint('[Translation] error: $err');
+          if (mounted) {
+            setState(() => _partialTranslations[index] = '⚠ 翻译失败: $err');
+          }
         },
       );
     } catch (e) {
       debugPrint('[Translation] exception: $e');
+      if (mounted) {
+        setState(() => _partialTranslations[index] = '⚠ 翻译失败: $e');
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('翻译失败: $e'),
+            duration: const Duration(seconds: 3),
+          ),
+        );
+      }
+    } finally {
+      if (mounted) setState(() => _translatingIndices.remove(index));
     }
   }
 
@@ -659,8 +682,10 @@ class _RecordingScreenState extends ConsumerState<RecordingScreen>
               seg.originalText,
               style: Theme.of(context).textTheme.bodyMedium,
             ),
-            // 译文（流式更新中）
-            if (translation != null && translation.isNotEmpty) ...[
+            // 译文（流式更新中 / 翻译中 / 失败）
+            if (_translatingIndices.contains(index) &&
+                (translation == null || translation.isEmpty)) ...[
+              // 模型加载中或翻译中（尚无 token 输出）
               const SizedBox(height: 8),
               Container(
                 padding: const EdgeInsets.all(8),
@@ -668,11 +693,44 @@ class _RecordingScreenState extends ConsumerState<RecordingScreen>
                   color: colorScheme.surfaceContainerHighest,
                   borderRadius: BorderRadius.circular(6),
                 ),
+                child: Row(
+                  children: [
+                    SizedBox(
+                      width: 14,
+                      height: 14,
+                      child: CircularProgressIndicator(
+                        strokeWidth: 2,
+                        color: colorScheme.onSurfaceVariant,
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                    Text(
+                      '正在翻译...',
+                      style: TextStyle(
+                        fontSize: 13,
+                        color: colorScheme.onSurfaceVariant,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ] else if (translation != null && translation.isNotEmpty) ...[
+              const SizedBox(height: 8),
+              Container(
+                padding: const EdgeInsets.all(8),
+                decoration: BoxDecoration(
+                  color: translation.startsWith('⚠')
+                      ? colorScheme.errorContainer.withValues(alpha: 0.3)
+                      : colorScheme.surfaceContainerHighest,
+                  borderRadius: BorderRadius.circular(6),
+                ),
                 child: SelectableText(
                   translation,
                   style: TextStyle(
                     fontSize: 13,
-                    color: colorScheme.onSurfaceVariant,
+                    color: translation.startsWith('⚠')
+                        ? colorScheme.error
+                        : colorScheme.onSurfaceVariant,
                     height: 1.4,
                   ),
                 ),
