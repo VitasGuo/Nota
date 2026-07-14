@@ -3,9 +3,42 @@
 ## 项目目标
 NOTA - Note with ASR，私人 AI 笔记软件。基于 Flutter，集成 ai_router_module 统一管理多 AI 平台，聚焦"录音 → 转写 → 笔记"场景。派生自 xiaop v1.4.1（AI 情感陪伴助手），继承其多 AI 提供商、主题等基础设施，后续将向笔记 + 语音识别（ASR）方向演进。
 
-## 当前版本: v0.9.9
+## 当前版本: v0.9.10
 
 ## 版本历史
+
+### v0.9.10 (2026-07-14) - 流式 ASR 引擎解决吞字 + 翻译 prompt 强化抑制对话式回复
+- **目标**：① 引入 sherpa-onnx OnlineRecognizer 流式识别，从根本上解决 VAD 分段导致的吞字问题；② 强化翻译 prompt，抑制云端大模型（尤其无 thinking 模式的）输出对话式回复（"好的"/"以下是翻译"等寒暄）
+- **吞字根因分析**：VAD 分段 + OfflineRecognizer 整段推理模式下，VAD 边界截断会导致段首/段尾字符丢失。博客 `dustyposa.github.io/posts/2025-05-asr流式模型踩坑记/` 确认流式 ASR 需用 OnlineRecognizer 维护跨 chunk 内部状态
+- **新增流式 Paraformer 模型**（`asr_model_info.dart`）
+  - `paraformer-streaming-zh-en`：阿里 Paraformer 流式中英双语 int8 量化 ~237MB（encoder.int8 165MB + decoder.int8 71MB + tokens.txt 76KB），从魔搭 `pengzhendong/sherpa-onnx-streaming-paraformer-bilingual-zh-en` 下载，列为推荐首选
+- **新增 OnlineSherpaRealtimeAsrEngine 流式引擎**（`realtime_asr_engine.dart`，~270 行）
+  - 基于 sherpa-onnx OnlineRecognizer，PCM16 音频直接喂入 OnlineStream，模型内部维护跨 chunk 上下文，无 VAD 边界丢字
+  - 内置端点检测（enableEndpoint: true，rule1MinTrailingSilence=2.4 / rule2MinTrailingSilence=1.2 / rule3MinUtteranceLength=20），替代外部 VAD
+  - `acceptWaveform` → `decode` → `isEndpoint` → `getResult` → `reset` 循环：端点触发时 onFinal 回调最终结果并 reset；非端点时 getResult 返回累积文本经 onPartial 回调实时显示
+  - stop 时喂入静音 flush 尾部残余段；dispose 释放 _stream + _recognizer 原生资源
+- **RealtimeAsrEngine 抽象类新增 onPartial 回调**（`realtime_asr_engine.dart`）
+  - `void Function(String text)? onPartial`：流式引擎在解码过程中通过 getResult() 返回累积文本，UI 可实时显示"正在识别..."的中间结果。仅 OnlineSherpaRealtimeAsrEngine 触发，离线/云端引擎不触发
+- **VAD 参数调优**（`realtime_asr_engine.dart` VadConfig 默认值，离线引擎回退时生效）
+  - threshold 0.5→0.35（更灵敏，减少语音截断）
+  - minSilenceDuration 0.8→1.0（更长静音才切段，减少过度分段）
+- **短段零填充替代丢弃**（`SherpaRealtimeAsrEngine._processQueue`）
+  - < 1600 样本（0.1s）的音频段不再 `continue` 跳过，改为零填充到 1600 样本，避免丢弃短促语音
+- **翻译 prompt 强化**（`recording_screen.dart` _buildTranslationPrompt + `translation_service.dart` _buildSystemPrompt）
+  - 角色定义从"你是专业翻译"改为"你是专业翻译引擎（非对话助手）"
+  - 新增规则："禁止任何对话式回复——不得出现'好的'、'以下是翻译'、'我来帮你'等寒暄或元话语，输出的第一个字必须是译文的第一个字"
+  - 解决云端大模型（尤其无 thinking 模式的）输出对话式回复污染译文的问题
+- **recording_screen 引擎选择三级优先级**（`recording_screen.dart` _initAsrEngine）
+  - 1. 流式优先：paraformer-streaming-zh-en → OnlineSherpaRealtimeAsrEngine（无 VAD，无吞字，首选）
+  - 2. 离线回退：sensevoice-zh / paraformer-zh → SherpaRealtimeAsrEngine（VAD + OfflineRecognizer）
+  - 3. 云端回退：CloudRealtimeAsrEngine（VAD + 云端 Whisper 兼容 API）
+  - 流式引擎无需 VAD（内置端点检测），离线/云端引擎才检查 VAD 模型就绪
+- **onPartial UI 集成**（`recording_screen.dart`）
+  - 新增 `_partialAsrText` 状态字段，onPartial 回调实时更新
+  - `_buildListeningIndicator` 改造：`_partialAsrText` 非空时显示实时识别文本，否则回退到"正在聆听..."
+  - onSpeechStart / _onAsrFinal / 录音开始/停止/取消时均清空 `_partialAsrText`
+- **验证**：`flutter analyze lib/`（7 个既有 info，0 error/warning）；版本号 0.9.9+1 → 0.9.10+1
+- **待真机测试**：流式 Paraformer 下载（魔搭源）+ 实时识别延迟/准确率 + onPartial 实时文本显示效果 + 翻译 prompt 强化是否有效抑制对话式回复
 
 ### v0.9.9 (2026-07-14) - 砍掉 whisper.cpp + llama.cpp ASR，保留 sherpa-onnx + llama.cpp 文本 LLM
 - **目标**：删除功能完成度低的 whisper.cpp ASR + llama.cpp ASR（mtmd 接口），保留 sherpa-onnx 作为唯一本地 ASR + llama.cpp 文本 LLM 翻译，确保本地「转文字→翻译」链条彻底打通。whisper.cpp + llama.cpp ASR 代码提取备份到 `C:\Users\VitasGuo\Documents\SOLO\ASR_module`

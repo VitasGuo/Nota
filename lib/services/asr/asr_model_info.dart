@@ -94,11 +94,26 @@ class AsrModels {
 
   /// 预置可用模型。
   ///
-  /// - SenseVoice Small：多语言（中英日韩粤），~239MB，从魔搭社区下载，国内首选
+  /// - Paraformer 流式中英双语：~237MB（int8），支持实时流式识别（OnlineRecognizer），
+  ///   模型内部维护上下文无 VAD 边界丢字，推荐首选
+  /// - SenseVoice Small：多语言（中英日韩粤），~239MB，离线整段推理
   /// - Whisper Medium：多语言，769M，质量与速度均衡
   /// - Whisper Large v3 Turbo：多语言，809M，速度更快质量更好
   /// - Paraformer 中文：220M，原生支持热词 boosting，中文场景首选
   static const List<AsrModelInfo> available = [
+    AsrModelInfo(
+      id: 'paraformer-streaming-zh-en',
+      displayName: 'Paraformer 流式 (中英双语, int8, ~237MB)',
+      downloadUrl: '', // 仅通过 ModelScope 下载
+      sizeBytes: 237 * 1024 * 1024, // encoder.int8.onnx (~165MB) + decoder.int8.onnx (~71MB) + tokens.txt (~76KB)
+      language: 'multi',
+      supportsHotwords: false,
+      description: '阿里 Paraformer 流式语音识别模型（int8 量化版），支持中英双语。'
+          '使用 OnlineRecognizer 实时流式识别，模型内部维护上下文无 VAD 边界丢字，'
+          '从根本上解决吞字问题。从魔搭社区（ModelScope）下载，国内网络最友好，推荐首选',
+      modelscopeRepo: 'pengzhendong/sherpa-onnx-streaming-paraformer-bilingual-zh-en',
+      modelscopeFiles: ['encoder.int8.onnx', 'decoder.int8.onnx', 'tokens.txt'],
+    ),
     AsrModelInfo(
       id: 'sensevoice-zh',
       displayName: 'SenseVoice Small (多语言, 中英日韩粤, ~239MB)',
@@ -107,7 +122,7 @@ class AsrModels {
       language: 'multi',
       supportsHotwords: false,
       description: '阿里 SenseVoice 多语言语音识别模型（Q8 量化版），支持中英日韩粤 5 种语言。'
-          '从魔搭社区（ModelScope）下载，国内网络最友好，推荐首选',
+          '从魔搭社区（ModelScope）下载，国内网络最友好',
       modelscopeRepo: 'xiaowangge/sherpa-onnx-sense-voice-small',
       modelscopeFiles: ['model_q8.onnx', 'tokens.txt'],
     ),

@@ -391,3 +391,17 @@
 - **现象**: v0.9.9 砍掉 whisper.cpp + llama.cpp ASR 后，`flutter analyze` 报 `warning - The value of the field '_asrLocalEnginePref' isn't used - lib\presentation\settings\asr_settings_screen.dart - unused_field`
 - **根因**: 子代理清理 `asr_settings_screen.dart` 时删除了 `_buildLocalAsrEnginePref` 引擎偏好下拉框（该下拉框是 `_asrLocalEnginePref` 的唯一读取方），但保留了 `_asrLocalEnginePref` 字段声明 + `_loadAsrData` 中的 `prefs.getString('asr_local_engine_pref')` 读取和 setState 赋值。字段变为"仅写不读"，Dart analyzer 标记 unused_field warning
 - **解决**: 删除 `_asrLocalEnginePref` 字段声明 + `_loadAsrData` 中 `asrEnginePref` 变量读取和 `setState` 赋值。规律：删除一个 UI 组件后，必须检查其绑定的状态字段是否还有其他读取方；若该字段仅被已删除的组件消费，需同步删除字段声明及所有赋值点，否则产生 unused_field warning。子代理批量删除 UI 逻辑时尤其要注意这种"字段残留"问题
+
+---
+
+## #50 VAD 分段 + OfflineRecognizer 整段推理导致吞字 — 改用 OnlineRecognizer 流式识别
+- **现象**: 用户反馈实时转写"老是吞字"，段首或段尾字符丢失，识别不完整
+- **根因**: 原 `SherpaRealtimeAsrEngine` 架构为 VAD 分段 → OfflineRecognizer 整段推理。VAD（silero_vad）基于能量/静音检测切段，边界截断时刻不精准：①段首语音起音瞬间可能被切掉（尤其爆破音/短促字）；②段尾静音阈值触发时可能截断最后一个字的尾音；③VAD `minSilenceDuration` 过短导致一句话被切成多段，每段独立推理丢失上下文关联。OfflineRecognizer 每段独立推理，无跨段上下文，无法补偿边界丢失
+- **解决**: 引入 `OnlineSherpaRealtimeAsrEngine`（sherpa-onnx OnlineRecognizer 流式识别）：
+  - PCM16 音频直接喂入 `OnlineStream.acceptWaveform`，模型内部维护跨 chunk 上下文状态，无 VAD 边界丢字
+  - 内置端点检测（`enableEndpoint: true`，`rule1MinTrailingSilence=2.4` / `rule2MinTrailingSilence=1.2` / `rule3MinUtteranceLength=20`），基于解码器状态而非纯能量检测，比 VAD 更准确
+  - `acceptWaveform` → `decode` → `isEndpoint` 循环：端点触发时 `getResult` 获取最终结果 + `reset` 开始新段；非端点时 `getResult` 返回累积文本经 `onPartial` 回调实时显示
+  - 模型：Paraformer 流式中英双语 int8（`paraformer-streaming-zh-en`，~237MB，魔搭 `pengzhendong/sherpa-onnx-streaming-paraformer-bilingual-zh-en`）
+  - 引擎优先级：流式（OnlineRecognizer）> 离线（VAD + OfflineRecognizer）> 云端
+  - 同时对离线引擎回退场景做 VAD 参数调优（threshold 0.5→0.35，minSilenceDuration 0.8→1.0）+ 短段零填充（< 1600 样本不丢弃，零填充到 1600）
+  - 规律：实时 ASR 场景应优先用流式识别器（OnlineRecognizer/Streaming ASR），模型内部维护跨 chunk 上下文；VAD 分段 + 整段推理仅适合批量转写（文件级），实时场景易因边界截断丢字。参考博客 `dustyposa.github.io/posts/2025-05-asr流式模型踩坑记/`

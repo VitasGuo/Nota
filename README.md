@@ -39,11 +39,12 @@
 ### 已实现（NOTA 业务 - Task 8/9 ASR 引擎实现 v0.4.0 + Task 6/7 实时 ASR v0.6.0）
 - LocalAsrEngine（`lib/services/asr/local_asr_engine.dart`）：基于 sherpa-onnx OfflineRecognizer，支持 SenseVoice（多语言，v0.8.0 新增）/ Whisper（中英文）/ Paraformer（中文，支持热词 boosting）模型；流式 onSegment 回调逐段输出；AsrModelManager 管理模型下载/激活/删除（Dio 流式下载 + 目录管理，v0.8.0 新增 ModelScope 下载源）；含 Android arm64 原生库
 - CloudAsrEngine（`lib/services/asr/cloud_asr_engine.dart`）：OpenAI Whisper API 兼容格式（multipart/form-data 上传音频文件），云端转写
-- RealtimeAsrEngine（`lib/services/asr/realtime_asr_engine.dart`，v0.6.0，v0.8.0 新增 SherpaRealtimeAsrEngine，v0.9.9 精简为两个实现）：实时 ASR 引擎抽象 + 两个实现
-  - SherpaRealtimeAsrEngine（v0.8.0，v0.9.9 起唯一本地引擎）：VAD 分段 → sherpa-onnx OfflineRecognizer 逐段转写，支持三类模型（SenseVoice 首选 / Paraformer 回退 / Whisper）
+- RealtimeAsrEngine（`lib/services/asr/realtime_asr_engine.dart`，v0.6.0，v0.8.0 新增 SherpaRealtimeAsrEngine，v0.9.10 新增 OnlineSherpaRealtimeAsrEngine 流式引擎）：实时 ASR 引擎抽象 + 三个实现
+  - OnlineSherpaRealtimeAsrEngine（v0.9.10，流式首选）：sherpa-onnx OnlineRecognizer 流式识别，PCM16 直接喂入 OnlineStream，模型内部维护跨 chunk 上下文无 VAD 边界丢字；内置端点检测（rule1MinTrailingSilence=2.4 / rule2MinTrailingSilence=1.2 / rule3MinUtteranceLength=20）；onPartial 回调实时显示累积文本。模型：Paraformer 流式中英双语 int8 ~237MB（魔搭 `pengzhendong/sherpa-onnx-streaming-paraformer-bilingual-zh-en`）
+  - SherpaRealtimeAsrEngine（v0.8.0，离线回退）：VAD 分段 → sherpa-onnx OfflineRecognizer 逐段转写，支持三类模型（SenseVoice 首选 / Paraformer 回退 / Whisper）；v0.9.10 调优 VAD 参数（threshold 0.35 / minSilenceDuration 1.0）+ 短段零填充不丢弃
   - CloudRealtimeAsrEngine：VAD 分段 → 写临时 WAV → CloudAsrEngine.transcribe → onFinal；支持无 VAD 整段上传模式
-  - 架构：转写异步串行队列，VAD 同步喂入快速不阻塞音频流；onPartial 未实现（整段推理无 token 级流式），UI 用 onSpeechStart 显示"正在转写..."占位
-  - 引擎优先级（v0.9.9）：sherpa-onnx ASR（SenseVoice > Paraformer）> 云端 ASR（默认 sherpa-onnx）
+  - 架构：流式引擎无需 VAD（内置端点检测），离线/云端引擎 VAD 同步喂入快速不阻塞音频流；onPartial 仅流式引擎触发，UI 实时显示"正在识别..."的中间文本
+  - 引擎优先级（v0.9.10）：流式 ASR（Paraformer streaming）> 离线 ASR（SenseVoice > Paraformer）> 云端 ASR
 - ~~whisper.cpp ASR 引擎 + Qwen3-ASR GGUF（mtmd）~~：v0.9.9 已移除（功能完成度低，代码提取备份到 `ASR_module`），本地 ASR 统一由 sherpa-onnx 承担
 
 ### 已实现（NOTA 业务 - Task 12 LLM 引擎实现 v0.4.0 + Task 10 LocalLlmEngine v0.6.0）
@@ -225,15 +226,20 @@ LLM 整理 ──► NoteStorage.insertNote ──► notes 表（session_id 关
 
 > PipelineOrchestrator 单例编排上述 6 步，支持 runFullPipeline 一键执行 / runStep 分步执行，onStepProgress + onLog 回调；错误传播策略见"关键设计决策"。
 
-## 核心数据流（实时 ASR 转写，v0.6.0，v0.8.0 新增 SenseVoice，v0.9.9 精简为 sherpa-onnx）
+## 核心数据流（实时 ASR 转写，v0.6.0，v0.8.0 新增 SenseVoice，v0.9.10 新增流式引擎）
 
 ```
 麦克风 PCM16 流 (MicRecorder.startStream, 16kHz 单声道)
-  → VadDetector.feedPcm16 (sherpa-onnx Silero VAD 队列式分段)
-  → onSpeechEnd(samples, startSec, endSec) → 入 _pending 队列
-  → 串行 _processQueue (按引擎优先级选择其一):
-      ├─ SherpaRealtimeAsrEngine: sherpa-onnx OfflineRecognizer (SenseVoice 首选 / Paraformer / Whisper) → 文本 [v0.9.9 唯一本地引擎]
-      └─ CloudRealtimeAsrEngine: 写临时 WAV → CloudAsrEngine.transcribe → 合并文本
+  → 按引擎优先级选择其一 (v0.9.10 三级):
+      ├─ OnlineSherpaRealtimeAsrEngine [流式首选, 无 VAD]:
+      │    → OnlineStream.acceptWaveform → decode → isEndpoint 循环
+      │    → 非端点: getResult → onPartial(累积文本) → UI 实时显示"正在识别..."
+      │    → 端点: getResult → onFinal(完整文本) + reset(开始新段)
+      ├─ SherpaRealtimeAsrEngine [离线回退, VAD 分段]:
+      │    → VadDetector.feedPcm16 → onSpeechEnd → _pending 队列
+      │    → OfflineRecognizer (SenseVoice / Paraformer) → onFinal
+      └─ CloudRealtimeAsrEngine [云端回退, VAD 分段]:
+           → VadDetector → 写临时 WAV → CloudAsrEngine.transcribe → onFinal
   → onFinal(TranscriptSegment) → RecordingScreen:
       ├─ UI: 段落卡片加入列表 + 自动滚动
       ├─ 持久化: TranscriptStorage.insertSegment (即写即存，崩溃不丢失)
@@ -241,7 +247,7 @@ LLM 整理 ──► NoteStorage.insertNote ──► notes 表（session_id 关
   → 停止: MicRecorder.stopStream + AsrEngine.stop (等待队列清空) + 写 WAV 备份 + 更新 session.endTime
 ```
 
-> 架构亮点：VAD 同步分段不阻塞音频流，转写异步串行处理；onPartial 未实现（整段推理无 token 级流式），UI 用 onSpeechStart 显示"正在转写..."占位。引擎优先级（v0.9.9）：sherpa-onnx ASR（SenseVoice > Paraformer）> 云端 ASR（默认 sherpa-onnx）。v0.9.9 移除 whisper.cpp + llama.cpp ASR（mtmd），本地 ASR 统一由 sherpa-onnx 承担。
+> 架构亮点：流式引擎（OnlineRecognizer）模型内部维护跨 chunk 上下文，无 VAD 边界丢字，从根本上解决吞字问题（traps.md #50）；内置端点检测替代外部 VAD，onPartial 回调实时显示累积文本。离线/云端回退引擎仍用 VAD 分段，已调优参数（threshold 0.35 / minSilenceDuration 1.0）+ 短段零填充。引擎优先级（v0.9.10）：流式 ASR（Paraformer streaming）> 离线 ASR（SenseVoice > Paraformer）> 云端 ASR。
 
 ## 关键设计决策
 

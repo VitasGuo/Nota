@@ -66,6 +66,9 @@ class _RecordingScreenState extends ConsumerState<RecordingScreen>
 
   // 正在聆听/转写指示
   bool _isListening = false; // VAD onSpeechStart 触发
+  // 流式 ASR 部分识别结果（仅 OnlineSherpaRealtimeAsrEngine 触发，
+  // 实时显示正在识别的文本，onFinal 后清空）
+  String? _partialAsrText;
 
   // 实时翻译开关
   bool _realtimeTranslationEnabled = false;
@@ -122,30 +125,46 @@ class _RecordingScreenState extends ConsumerState<RecordingScreen>
 
   /// 检测并初始化 ASR 引擎。
   ///
-  /// 本地引擎使用 sherpa-onnx（SenseVoice/Paraformer/Whisper），
-  /// 完全离线，无网络依赖。云端 ASR 作为回退方案。
+  /// 引擎选择三级优先级：
+  /// 1. 流式优先：paraformer-streaming-zh-en（OnlineRecognizer，无 VAD 边界丢字，首选）
+  /// 2. 离线回退：sensevoice-zh / paraformer-zh（OfflineRecognizer + VAD）
+  /// 3. 云端回退：CloudRealtimeAsrEngine（VAD + 云端 Whisper 兼容 API）
   Future<void> _initAsrEngine() async {
     if (_asrEngine != null && _asrEngine!.isReady) return;
 
-    // 检查 VAD 模型（本地与云端实时 ASR 均依赖）
-    // VAD 模型已内置到 assets/models/silero_vad.onnx，首次调用自动释放
-    final vadReady = await _asrModelManager.isVadModelDownloaded();
-    if (!vadReady) {
-      throw StateError('VAD 模型未就绪，请重新安装应用或联系开发者');
-    }
-    final vadPath = await _asrModelManager.getVadModelPath();
+    // VAD 模型已内置到 assets/models/silero_vad.onnx，首次调用自动释放。
+    // 仅离线/云端回退引擎需要 VAD，流式引擎（OnlineRecognizer）内置端点检测无需 VAD。
     final asrConfig = await _loadAsrConfig();
-
-    // 本地 sherpa-onnx 引擎（唯一本地引擎）
     final sherpaModels = await _asrModelManager.getDownloadedModels();
-    if (sherpaModels.isNotEmpty) {
-      // 优先 sensevoice-zh（多语言，魔搭下载，国内首选），
-      // 其次 paraformer-zh（中文，支持热词），否则取第一个
-      final chosen = sherpaModels.firstWhere(
+
+    // 1. 流式引擎优先（paraformer-streaming-zh-en）
+    final hasStreaming =
+        sherpaModels.any((m) => m.id == 'paraformer-streaming-zh-en');
+    if (hasStreaming) {
+      _asrEngine = OnlineSherpaRealtimeAsrEngine(
+        sherpaModelId: 'paraformer-streaming-zh-en',
+      );
+      _asrStatusHint = '使用流式识别（Paraformer 中英双语，无吞字）';
+      await _asrEngine!.init();
+      return;
+    }
+
+    // 2. 离线引擎回退（需 VAD）
+    final offlineModels = sherpaModels
+        .where((m) => m.id != 'paraformer-streaming-zh-en')
+        .toList();
+    if (offlineModels.isNotEmpty) {
+      final vadReady = await _asrModelManager.isVadModelDownloaded();
+      if (!vadReady) {
+        throw StateError('VAD 模型未就绪，请重新安装应用或联系开发者');
+      }
+      final vadPath = await _asrModelManager.getVadModelPath();
+      // 优先 sensevoice-zh（多语言），其次 paraformer-zh（中文+热词），否则取第一个
+      final chosen = offlineModels.firstWhere(
         (m) => m.id == 'sensevoice-zh',
-        orElse: () => sherpaModels.firstWhere(
+        orElse: () => offlineModels.firstWhere(
           (m) => m.id == 'paraformer-zh',
-          orElse: () => sherpaModels.first,
+          orElse: () => offlineModels.first,
         ),
       );
       _asrEngine = SherpaRealtimeAsrEngine(
@@ -158,11 +177,16 @@ class _RecordingScreenState extends ConsumerState<RecordingScreen>
       return;
     }
 
-    // 回退：云端 ASR
+    // 3. 云端 ASR 回退（需 VAD）
     if (asrConfig != null &&
         asrConfig.engineType == AsrEngineType.cloud &&
         (asrConfig.baseUrl?.isNotEmpty ?? false) &&
         (asrConfig.apiKey?.isNotEmpty ?? false)) {
+      final vadReady = await _asrModelManager.isVadModelDownloaded();
+      if (!vadReady) {
+        throw StateError('VAD 模型未就绪，请重新安装应用或联系开发者');
+      }
+      final vadPath = await _asrModelManager.getVadModelPath();
       _asrEngine = CloudRealtimeAsrEngine(
         asrConfig: asrConfig,
         vadModelPath: vadPath,
@@ -174,8 +198,8 @@ class _RecordingScreenState extends ConsumerState<RecordingScreen>
 
     throw StateError(
       '未配置可用的 ASR 引擎。\n'
-      '请在设置中下载 sherpa-onnx 模型（推荐 SenseVoice ~239MB，'
-      '从魔搭社区下载），或配置云端 ASR',
+      '请在设置中下载 sherpa-onnx 模型（推荐流式 Paraformer ~237MB，'
+      '从魔搭社区下载，无吞字），或配置云端 ASR',
     );
   }
 
@@ -222,7 +246,17 @@ class _RecordingScreenState extends ConsumerState<RecordingScreen>
 
       // 2. 配置 ASR 回调
       _asrEngine!.onSpeechStart = () {
-        if (mounted) setState(() => _isListening = true);
+        if (mounted) {
+          setState(() {
+            _isListening = true;
+            _partialAsrText = null; // 新段开始，清空上一段的中间结果
+          });
+        }
+      };
+      // 流式引擎的部分识别结果（仅 OnlineSherpaRealtimeAsrEngine 触发）：
+      // 实时显示"正在识别..."的累积文本，让用户看到识别进度而非干等
+      _asrEngine!.onPartial = (text) {
+        if (mounted) setState(() => _partialAsrText = text);
       };
       _asrEngine!.onFinal = _onAsrFinal;
       _asrEngine!.onError = (e, st) {
@@ -252,6 +286,7 @@ class _RecordingScreenState extends ConsumerState<RecordingScreen>
       _segments.clear();
       _partialTranslations.clear();
       _isListening = false;
+      _partialAsrText = null;
 
       // 4. 启动麦克风流（转广播流，ASR 引擎与界面各订阅一次）
       final stream = _micRecorder.startStream().asBroadcastStream();
@@ -332,6 +367,7 @@ class _RecordingScreenState extends ConsumerState<RecordingScreen>
       setState(() {
         _isRecording = false;
         _isListening = false;
+        _partialAsrText = null;
       });
       if (sessionId != null) _showPostRecordOptions(sessionId);
     }
@@ -349,6 +385,7 @@ class _RecordingScreenState extends ConsumerState<RecordingScreen>
       _segments.add(segment);
       _partialTranslations.add(null);
       _isListening = false;
+      _partialAsrText = null; // 最终结果已产出，清空中间态
     });
 
     // 持久化到数据库（fire-and-forget：实时转写回调中不阻塞流式体验，
@@ -669,6 +706,10 @@ class _RecordingScreenState extends ConsumerState<RecordingScreen>
 
   /// 构建"正在聆听..."指示器。
   Widget _buildListeningIndicator() {
+    // 流式引擎已产出部分识别文本时，显示实时识别内容（而非固定"正在聆听..."），
+    // 让用户看到识别进度。无部分结果时回退到固定文案。
+    final partial = _partialAsrText;
+    final hasPartial = partial != null && partial.isNotEmpty;
     return Container(
       margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
       padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
@@ -678,6 +719,7 @@ class _RecordingScreenState extends ConsumerState<RecordingScreen>
       ),
       child: Row(
         mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.center,
         children: [
           AnimatedBuilder(
             animation: _pulseController,
@@ -692,11 +734,13 @@ class _RecordingScreenState extends ConsumerState<RecordingScreen>
             ),
           ),
           const SizedBox(width: 8),
-          Text(
-            '正在聆听...',
-            style: TextStyle(
-              color: Theme.of(context).colorScheme.primary,
-              fontWeight: FontWeight.w500,
+          Expanded(
+            child: Text(
+              hasPartial ? partial : '正在聆听...',
+              style: TextStyle(
+                color: Theme.of(context).colorScheme.primary,
+                fontWeight: FontWeight.w500,
+              ),
             ),
           ),
         ],
@@ -874,16 +918,18 @@ class _RecordingScreenState extends ConsumerState<RecordingScreen>
   String _buildTranslationPrompt(String targetLang) {
     const baseConstraints = '严格规则：\n'
         '1) 只输出译文正文，不要输出思考过程、解释、注释、引号或任何前后缀\n'
-        '2) 保留原文的段落结构与标点风格\n'
-        '3) 数字、专有名词、人名、代码、URL、文件路径保持原样不翻译\n'
-        '4) 忠于原文含义，不增删信息，不意译发挥\n'
-        '5) 译文需自然流畅，符合目标语言习惯';
+        '2) 禁止任何对话式回复——不得出现"好的"、"以下是翻译"、"我来帮你"等寒暄或元话语，'
+        '输出的第一个字必须是译文的第一个字\n'
+        '3) 保留原文的段落结构与标点风格\n'
+        '4) 数字、专有名词、人名、代码、URL、文件路径保持原样不翻译\n'
+        '5) 忠于原文含义，不增删信息，不意译发挥\n'
+        '6) 译文需自然流畅，符合目标语言习惯';
     if (targetLang == '自动（中英互译）') {
-      return '你是专业翻译。任务：检测用户提供的文本语言——'
+      return '你是专业翻译引擎（非对话助手）。任务：检测用户提供的文本语言——'
           '若为中文翻译为英语，若为英语翻译为中文，其他语言原样输出。\n'
           '$baseConstraints';
     }
-    return '你是专业翻译。任务：将用户提供的文本翻译为$targetLang。'
+    return '你是专业翻译引擎（非对话助手）。任务：将用户提供的文本翻译为$targetLang。'
         '若原文已是$targetLang则原样输出。\n'
         '$baseConstraints';
   }
@@ -1034,6 +1080,7 @@ class _RecordingScreenState extends ConsumerState<RecordingScreen>
       setState(() {
         _isRecording = false;
         _isListening = false;
+        _partialAsrText = null;
         _segments.clear();
         _partialTranslations.clear();
         _pcmBuffer.clear();
