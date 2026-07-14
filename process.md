@@ -3,9 +3,25 @@
 ## 项目目标
 NOTA - Note with ASR，私人 AI 笔记软件。基于 Flutter，集成 ai_router_module 统一管理多 AI 平台，聚焦"录音 → 转写 → 笔记"场景。派生自 xiaop v1.4.1（AI 情感陪伴助手），继承其多 AI 提供商、主题等基础设施，后续将向笔记 + 语音识别（ASR）方向演进。
 
-## 当前版本: v0.9.8
+## 当前版本: v0.9.9
 
 ## 版本历史
+
+### v0.9.9 (2026-07-14) - 砍掉 whisper.cpp + llama.cpp ASR，保留 sherpa-onnx + llama.cpp 文本 LLM
+- **目标**：删除功能完成度低的 whisper.cpp ASR + llama.cpp ASR（mtmd 接口），保留 sherpa-onnx 作为唯一本地 ASR + llama.cpp 文本 LLM 翻译，确保本地「转文字→翻译」链条彻底打通。whisper.cpp + llama.cpp ASR 代码提取备份到 `C:\Users\VitasGuo\Documents\SOLO\ASR_module`
+- **删除文件**（4 个，上一会话已完成）：`lib/services/asr/whisper_ffi.dart` / `whisper_engine.dart` / `whisper_isolate_worker.dart` / `isolate_asr_worker.dart`
+- **引用清理**（7 个文件）：
+  - `asr_model_info.dart`（444→175 行）：删除 GgufModelFile/GgufAsrModelInfo/GgufAsrModels/WhisperModelInfo/WhisperModels 共 5 个类，仅保留 AsrModelInfo + AsrModels（sensevoice-zh / whisper-medium / whisper-large-v3-turbo / paraformer-zh）+ vadModel
+  - `asr_model_manager.dart`（851→437 行）：删除 GGUF 段（`_ggufMagic`/getGgufModelDir/validateGgufFile/isGgufModelDownloaded/getDownloadedGgufModels/getGgufModelPaths/downloadGgufModel/importGgufModel/deleteGgufModel）+ whisper 段（`_whisperGgmlMagic`/getWhisperModelDir/validateWhisperModelFile/isWhisperModelDownloaded/getDownloadedWhisperModels/getWhisperModelPath/downloadWhisperModel/importWhisperModel/deleteWhisperModel）+ `file_picker` import
+  - `llama_cpp_ffi.dart`（1011→740 行）：删除所有 mtmd FFI 绑定（mtmd Opaque 类型 + 枚举常量 + progress_callback typedef + mtmd_input_text/mtmd_context_params 结构体 + 14 对 _mtmd_* typedef + `_mtmdLib` 字段 + mtmd 库加载 + 14 个 mtmd late final 函数绑定），构造函数改为 `LlamaCppFfi._(this._llamaLib)`，仅保留 llama_* 文本 LLM 绑定
+  - `llama_cpp_engine.dart`（512→303 行）：删除 `dart:typed_data` import + `_mtmdCtx`/`_isAsrModelLoaded` 字段 + `isAsrModelLoaded`/`asrAudioSampleRate` getter + `loadAsrModel`/`transcribeAudio`（~186 行）+ `disposeAsr` 方法，`isLoaded` getter 改为 `=> _isTextModelLoaded`，`dispose` 移除 disposeAsr 调用。保留 load/generate/dispose/disposeBackend/modelDesc/nCtx/_tokenize/_tokenToPiece/_decodeTokens
+  - `realtime_asr_engine.dart`：删除 LocalRealtimeAsrEngine（~178 行，基于 IsolateAsrWorker + llama.cpp mtmd）+ WhisperRealtimeAsrEngine（~163 行，基于 WhisperIsolateWorker + whisper.cpp），仅保留 SherpaRealtimeAsrEngine + CloudRealtimeAsrEngine，移除 isolate_asr_worker/whisper_isolate_worker import
+  - `recording_screen.dart`：`_initAsrEngine` 从多引擎偏好+回退链简化为 sherpa 优先 + cloud 回退，删除 `enginePref` 读取 + `tryOrder` switch + whisper/gguf 模型加载分支 + `_whisperLanguage` 方法，错误提示改为"下载 sherpa-onnx 模型（推荐 SenseVoice ~239MB，从魔搭社区下载）"
+  - `asr_settings_screen.dart`（976→499 行）：删除 GGUF 状态字段（4 个）+ whisper 状态字段（3 个）+ `_asrLocalEnginePref` 字段 + `_buildLocalAsrEnginePref` 引擎偏好下拉框 + whisper 全套方法（_buildWhisperAsrSection/_downloadWhisperModel/_importWhisperModel/_deleteWhisperModel）+ GGUF 全套方法（_buildGgufAsrSection/_downloadGgufModel/_importGgufModel/_deleteGgufModel），`build` 仅保留 `ASR 引擎` 单一区块
+- **Android 原生库清理**：删除 `jniLibs/arm64-v8a/libwhisper_android.so` + `libmtmd.so`，保留 `libllama.so` + `libggml.so` + `libggml-cpu.so` + `libggml-base.so`
+- **翻译链条完整性**：`recording_screen._translateSegment` → `LlmTaskRouter.getEngine(translation)` → `LocalLlmEngine.init` → `LlamaCppEngine.load` → `generate`（ChatML + /no_think）链条未受影响，本地「sherpa-onnx 转文字 → llama.cpp 翻译」彻底打通
+- **修复**：`asr_settings_screen.dart` 删除 `_asrLocalEnginePref` 字段（子代理清理后仅赋值无读取，消除 unused_field warning，traps.md #49）
+- **验证**：`flutter analyze lib/`（7 个既有 info，0 error/warning）；版本号 0.9.8+1 → 0.9.9+1
 
 ### v0.9.8 (2026-07-14) - ASR 设置二级菜单 + AI Router key bug 修复 + 本地模型测试加载
 - **目标**：① 设置页 ASR 部分抽取为独立子页面，简化主设置页；② 修复 AI Router key 输入后"测试连接"按钮不激活的 bug；③ 本地 GGUF 模型加"测试加载"按钮，让用户在设置页验证模型能否正常加载；④ whisper 下载区块加国内 403 警告提示

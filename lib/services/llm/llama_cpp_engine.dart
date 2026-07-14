@@ -1,27 +1,20 @@
 // lib/services/llm/llama_cpp_engine.dart
 //
-// 通用 GGUF 推理引擎封装，基于 LlamaCppFfi。
+// GGUF 文本 LLM 推理引擎封装，基于 LlamaCppFfi。
 //
-// 同时服务于：
-// - 文本 LLM 推理（load + generate 流式生成）
-// - ASR 音频转写（loadAsrModel + transcribeAudio，基于 Qwen3-ASR mtmd 接口）
+// 用于文本生成（翻译/纠错/摘要）：load + generate 流式生成。
 //
 // 线程安全：当前为同步实现，FFI 调用在调用线程执行。
-// 实时 ASR 场景下由 [IsolateAsrWorker] 在独立 Isolate 中调用，不阻塞主线程。
-// 批量转写场景（TranscriptionService）可接受短暂阻塞。
 
 import 'dart:ffi';
-import 'dart:typed_data';
 
 import 'package:ffi/ffi.dart';
 
 import 'package:nota/services/llm/llama_cpp_ffi.dart';
 
-/// GGUF 模型推理引擎。
+/// GGUF 文本 LLM 推理引擎。
 ///
-/// 封装 llama.cpp C API，提供文本生成和音频转写两种推理模式。
-/// 两种模式共享同一套 llama.cpp backend + model + context 基础设施，
-/// ASR 模式额外加载 mmproj 文件创建 mtmd 上下文。
+/// 封装 llama.cpp C API，提供文本生成推理（load + generate）。
 class LlamaCppEngine {
   LlamaCppEngine() : _ffi = LlamaCppFfi();
 
@@ -32,21 +25,18 @@ class LlamaCppEngine {
   Pointer<llama_context>? _ctx;
   Pointer<llama_vocab>? _vocab;
   Pointer<llama_sampler>? _sampler;
-  Pointer<mtmd_context>? _mtmdCtx;
 
   /// llama.cpp backend 是进程级全局资源，多个 LlamaCppEngine 实例共享。
   /// 用静态标志避免重复 init，dispose 时也不释放（仅 app 退出时由
   /// [disposeBackend] 静态方法统一释放），防止一个实例 dispose 破坏其他实例。
   static bool _backendInitialized = false;
   bool _isTextModelLoaded = false;
-  bool _isAsrModelLoaded = false;
   bool _disposed = false;
 
   // --- 状态查询 ---
 
-  bool get isLoaded => _isTextModelLoaded || _isAsrModelLoaded;
+  bool get isLoaded => _isTextModelLoaded;
   bool get isTextModelLoaded => _isTextModelLoaded;
-  bool get isAsrModelLoaded => _isAsrModelLoaded;
   bool get isDisposed => _disposed;
 
   /// 获取模型描述（如 "Qwen3 1.7B Q6_K"）
@@ -188,211 +178,12 @@ class LlamaCppEngine {
   }
 
   // ========================================================================
-  // ASR 音频转写（Qwen3-ASR via mtmd）
-  // ========================================================================
-
-  /// 加载 ASR 模型（Qwen3-ASR）。
-  ///
-  /// [textModelPath] 主模型 GGUF 路径（Qwen3-ASR-1.7B-Q6_K.gguf）
-  /// [mmprojPath] 音频投影器 GGUF 路径（mmproj 文件）
-  /// [nCtx] 上下文长度（默认 4096，音频 token 较多需要更大上下文）
-  /// [nThreads] 推理线程数（默认 4）
-  Future<void> loadAsrModel(String textModelPath, String mmprojPath,
-      {int nCtx = 4096, int nThreads = 4}) async {
-    _ensureNotDisposed();
-    if (_isAsrModelLoaded) {
-      throw StateError('ASR 模型已加载，请先 disposeAsr 再重新加载');
-    }
-
-    _ensureBackend();
-
-    // 1. 加载文本模型
-    final modelParams = _ffi.llamaModelDefaultParams();
-    modelParams.nGpuLayers = 0;
-    modelParams.useMmap = true;
-
-    final textPathC = textModelPath.toNativeUtf8();
-    try {
-      _model = _ffi.llamaModelLoadFromFile(textPathC, modelParams);
-      if (_model == null || _model!.address == 0) {
-        throw StateError('ASR 文本模型加载失败: $textModelPath');
-      }
-    } finally {
-      malloc.free(textPathC);
-    }
-
-    _vocab = _ffi.llamaModelGetVocab(_model!);
-
-    // 2. 创建上下文
-    final ctxParams = _ffi.llamaContextDefaultParams();
-    ctxParams.nCtx = nCtx;
-    ctxParams.nBatch = 512;
-    ctxParams.nThreads = nThreads;
-    ctxParams.nThreadsBatch = nThreads;
-    ctxParams.embeddings = false;
-
-    _ctx = _ffi.llamaInitFromModel(_model!, ctxParams);
-    if (_ctx == null || _ctx!.address == 0) {
-      _ffi.llamaModelFree(_model!);
-      _model = null;
-      _vocab = null;
-      throw StateError('ASR 上下文创建失败: $textModelPath');
-    }
-
-    // 3. 初始化 mtmd 上下文（音频投影器）
-    final mtmdParams = _ffi.mtmdContextParamsDefault();
-    mtmdParams.useGpu = false; // CPU only
-    mtmdParams.printTimings = false;
-    mtmdParams.nThreads = nThreads;
-    mtmdParams.warmup = false; // 跳过 warmup 加快启动
-
-    final mmprojPathC = mmprojPath.toNativeUtf8();
-    try {
-      _mtmdCtx = _ffi.mtmdInitFromFile(mmprojPathC, _model!, mtmdParams);
-      if (_mtmdCtx == null || _mtmdCtx!.address == 0) {
-        throw StateError('mtmd 上下文初始化失败: $mmprojPath');
-      }
-    } finally {
-      malloc.free(mmprojPathC);
-    }
-
-    // 4. 验证音频支持
-    if (!_ffi.mtmdSupportAudio(_mtmdCtx!)) {
-      _ffi.mtmdFree(_mtmdCtx!);
-      _mtmdCtx = null;
-      _ffi.llamaFree(_ctx!);
-      _ctx = null;
-      _ffi.llamaModelFree(_model!);
-      _model = null;
-      _vocab = null;
-      throw StateError('模型不支持音频输入: $mmprojPath');
-    }
-
-    // 5. 采样器
-    _sampler = _ffi.llamaSamplerInitGreedy();
-
-    _isAsrModelLoaded = true;
-  }
-
-  /// 获取 ASR 模型要求的音频采样率（Qwen3-ASR = 16000 Hz）。
-  int get asrAudioSampleRate {
-    if (!isAsrModelLoaded || _mtmdCtx == null) {
-      throw StateError('ASR 模型未加载');
-    }
-    return _ffi.mtmdGetAudioSampleRate(_mtmdCtx!);
-  }
-
-  /// 转写音频为文本。
-  ///
-  /// [pcmSamples] PCM F32 单声道音频数据（16kHz，归一化到 [-1.0, 1.0]）
-  /// [prompt] 转写提示词（默认空，仅含 media marker）
-  ///
-  /// 返回转写文本。
-  String transcribeAudio(Float32List pcmSamples, {String? prompt}) {
-    _ensureNotDisposed();
-    if (!_isAsrModelLoaded || _mtmdCtx == null) {
-      throw StateError('ASR 模型未加载，请先调用 loadAsrModel()');
-    }
-
-    // 默认 prompt：仅 media marker，让模型直接输出转写
-    final actualPrompt = prompt ?? '<__media__>';
-
-    // 1. 清空 KV cache
-    _ffi.llamaMemorySeqRm(_ctx!, 0, 0, -1);
-
-    // 2. 创建 audio bitmap
-    final pcmPtr = malloc<Float>(pcmSamples.length);
-    final pcmData = pcmPtr.asTypedList(pcmSamples.length);
-    pcmData.setAll(0, pcmSamples);
-
-    final bitmap = _ffi.mtmdBitmapInitFromAudio(pcmSamples.length, pcmPtr);
-    // 注意：mtmd_bitmap_init_from_audio 会复制数据，pcmPtr 可立即释放
-    malloc.free(pcmPtr);
-
-    if (bitmap.address == 0) {
-      throw StateError('音频 bitmap 创建失败');
-    }
-
-    // 3. 构建 input_text（包含 media marker）
-    final inputText = malloc<mtmd_input_text>();
-    inputText.ref.text = actualPrompt.toNativeUtf8();
-    inputText.ref.addSpecial = true;
-    inputText.ref.parseSpecial = true;
-
-    // 4. 构建 bitmaps 数组（Pointer<Pointer<mtmd_bitmap>>）
-    final bitmapsArr = malloc<Pointer<mtmd_bitmap>>(1);
-    bitmapsArr[0] = bitmap;
-
-    // 5. tokenize（将文本 + 音频转为 chunks）
-    final chunks = _ffi.mtmdInputChunksInit();
-
-    try {
-      final tokenizeRet =
-          _ffi.mtmdTokenize(_mtmdCtx!, chunks, inputText, bitmapsArr, 1);
-      if (tokenizeRet != 0) {
-        throw StateError('mtmd_tokenize 失败: ret=$tokenizeRet');
-      }
-
-      // 6. eval chunks（自动处理 text + audio chunk 分发）
-      final nPastPtr = malloc<Int32>();
-      nPastPtr.value = 0;
-
-      try {
-        final evalRet = _ffi.mtmdHelperEvalChunks(
-            _mtmdCtx!, _ctx!, chunks, 0, 0, 512, true, nPastPtr);
-        if (evalRet != 0) {
-          throw StateError('mtmd_helper_eval_chunks 失败: ret=$evalRet');
-        }
-      } finally {
-        malloc.free(nPastPtr);
-      }
-    } finally {
-      // 释放资源
-      _ffi.mtmdInputChunksFree(chunks);
-      _ffi.mtmdBitmapFree(bitmap);
-      malloc.free(inputText.ref.text);
-      malloc.free(inputText);
-      malloc.free(bitmapsArr);
-    }
-
-    // 7. 逐 token 生成（采样直到 EOG）
-    final result = StringBuffer();
-    const int maxTokens = 1024; // ASR 输出通常不超过 1024 token
-
-    for (int i = 0; i < maxTokens; i++) {
-      final newToken = _ffi.llamaSamplerSample(_sampler!, _ctx!, -1);
-      if (_ffi.llamaVocabIsEog(_vocab!, newToken)) break;
-
-      final piece = _tokenToPiece(newToken);
-      if (piece.isNotEmpty) {
-        result.write(piece);
-      }
-
-      // decode 新 token
-      _decodeTokens([newToken], logitsLast: true);
-    }
-
-    return result.toString().trim();
-  }
-
-  // ========================================================================
   // 资源释放
   // ========================================================================
-
-  /// 释放 ASR 模型资源（保留文本模型）。
-  void disposeAsr() {
-    if (_mtmdCtx != null) {
-      _ffi.mtmdFree(_mtmdCtx!);
-      _mtmdCtx = null;
-    }
-    _isAsrModelLoaded = false;
-  }
 
   /// 释放所有资源。
   void dispose() {
     if (_disposed) return;
-
-    disposeAsr();
 
     if (_sampler != null) {
       _ffi.llamaSamplerFree(_sampler!);

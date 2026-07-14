@@ -1,19 +1,16 @@
 // lib/services/llm/llama_cpp_ffi.dart
 //
-// llama.cpp + mtmd C API 的 Dart FFI 绑定。
+// llama.cpp C API 的 Dart FFI 绑定（仅文本 LLM 推理）。
 //
 // 覆盖：
 // - llama backend / model / context / batch / decode / logits
 // - llama sampler chain / greedy / sample
 // - llama vocab / tokenize / token_to_piece / is_eog
-// - mtmd context / bitmap(audio) / tokenize / support_audio / sample_rate
-// - mtmd-helper eval_chunks / get_n_tokens
 //
 // 原生库来源：llama.cpp 交叉编译为 Android arm64-v8a .so（见 process.md v0.4.3 基础设施）
-// - libllama.so：llama_* 函数
-// - libmtmd.so：mtmd_* / mtmd_helper_* 函数（依赖 libllama.so → libggml.so → libggml-cpu.so → libggml-base.so）
+// - libllama.so：llama_* 函数（依赖 libggml.so → libggml-cpu.so → libggml-base.so）
 //
-// 类型名保持 snake_case 以匹配 C 头文件命名（FFI 绑定惯例），便于与 llama.h / mtmd.h 对照。
+// 类型名保持 snake_case 以匹配 C 头文件命名（FFI 绑定惯例），便于与 llama.h 对照。
 
 // ignore_for_file: camel_case_types
 
@@ -30,10 +27,6 @@ final class llama_context extends Opaque {}
 final class llama_vocab extends Opaque {}
 final class llama_sampler extends Opaque {}
 final class llama_memory_i extends Opaque {}
-final class mtmd_context extends Opaque {}
-final class mtmd_bitmap extends Opaque {}
-final class mtmd_input_chunk extends Opaque {}
-final class mtmd_input_chunks extends Opaque {}
 
 // ============================================================================
 // 2. 枚举常量（C enum 在 Dart FFI 中用 int 表示）
@@ -74,21 +67,12 @@ const int kLlamaAttentionTypeNonCausal = 1;
 const int kLlamaContextTypeDefault = 0;
 const int kLlamaContextTypeMtp = 1;
 
-// enum mtmd_input_chunk_type
-const int kMtmdInputChunkTypeText = 0;
-const int kMtmdInputChunkTypeImage = 1;
-const int kMtmdInputChunkTypeAudio = 2;
-
 // ============================================================================
 // 3. 回调函数类型
 // ============================================================================
 
 // typedef bool (*llama_progress_callback)(float progress, void * user_data);
 typedef llama_progress_callback_native
-    = Bool Function(Float progress, Pointer<Void> userData);
-
-// typedef bool (*mtmd_progress_callback)(float progress, void * user_data);
-typedef mtmd_progress_callback_native
     = Bool Function(Float progress, Pointer<Void> userData);
 
 // typedef bool (*ggml_abort_callback)(void * data);
@@ -127,25 +111,6 @@ final class llama_batch extends Struct {
   external Pointer<Pointer<Int32>> seqId;
 
   external Pointer<Int8> logits;
-}
-
-/// mtmd_input_text —— mtmd_tokenize 的文本输入
-///
-/// ```c
-/// struct mtmd_input_text {
-///     const char * text;
-///     bool add_special;
-///     bool parse_special;
-/// };
-/// ```
-final class mtmd_input_text extends Struct {
-  external Pointer<Utf8> text;
-
-  @Bool()
-  external bool addSpecial;
-
-  @Bool()
-  external bool parseSpecial;
 }
 
 /// llama_sampler_chain_params —— 仅含 1 个 bool
@@ -354,65 +319,6 @@ final class llama_context_params extends Struct {
   external Pointer<llama_context> ctxOther;
 }
 
-/// mtmd_context_params —— mtmd 上下文参数（通过 mtmd_context_params_default() 获取默认值）
-///
-/// ```c
-/// struct mtmd_context_params {
-///     bool use_gpu;
-///     bool print_timings;
-///     int n_threads;
-///     const char * image_marker;
-///     const char * media_marker;
-///     enum llama_flash_attn_type flash_attn_type;
-///     bool warmup;
-///     int image_min_tokens;
-///     int image_max_tokens;
-///     ggml_backend_sched_eval_callback cb_eval;
-///     void * cb_eval_user_data;
-///     int32_t batch_max_tokens;
-///     mtmd_progress_callback progress_callback;
-///     void * progress_callback_user_data;
-/// };
-/// ```
-final class mtmd_context_params extends Struct {
-  @Bool()
-  external bool useGpu;
-
-  @Bool()
-  external bool printTimings;
-
-  @Int32()
-  external int nThreads;
-
-  external Pointer<Utf8> imageMarker;
-
-  external Pointer<Utf8> mediaMarker;
-
-  @Int32()
-  external int flashAttnType;
-
-  @Bool()
-  external bool warmup;
-
-  @Int32()
-  external int imageMinTokens;
-
-  @Int32()
-  external int imageMaxTokens;
-
-  external Pointer<Void> cbEval; // ggml_backend_sched_eval_callback
-
-  external Pointer<Void> cbEvalUserData;
-
-  @Int32()
-  external int batchMaxTokens;
-
-  external Pointer<NativeFunction<mtmd_progress_callback_native>>
-      progressCallback;
-
-  external Pointer<Void> progressCallbackUserData;
-}
-
 // ============================================================================
 // 5. C/Dart 函数签名 typedef
 // ============================================================================
@@ -611,118 +517,20 @@ typedef _llama_sampler_sample_native
 typedef _llama_sampler_sample_dart
     = int Function(Pointer<llama_sampler> smpl, Pointer<llama_context> ctx, int idx);
 
-// --- mtmd ---
-
-typedef _mtmd_default_marker_native
-    = Pointer<Utf8> Function();
-typedef _mtmd_default_marker_dart
-    = Pointer<Utf8> Function();
-
-typedef _mtmd_context_params_default_native
-    = mtmd_context_params Function();
-typedef _mtmd_context_params_default_dart
-    = mtmd_context_params Function();
-
-typedef _mtmd_init_from_file_native = Pointer<mtmd_context> Function(
-    Pointer<Utf8> mmprojFname,
-    Pointer<llama_model> textModel,
-    mtmd_context_params ctxParams);
-typedef _mtmd_init_from_file_dart = Pointer<mtmd_context> Function(
-    Pointer<Utf8> mmprojFname,
-    Pointer<llama_model> textModel,
-    mtmd_context_params ctxParams);
-
-typedef _mtmd_free_native = Void Function(Pointer<mtmd_context> ctx);
-typedef _mtmd_free_dart = void Function(Pointer<mtmd_context> ctx);
-
-typedef _mtmd_support_audio_native
-    = Bool Function(Pointer<mtmd_context> ctx);
-typedef _mtmd_support_audio_dart
-    = bool Function(Pointer<mtmd_context> ctx);
-
-typedef _mtmd_get_audio_sample_rate_native
-    = Int32 Function(Pointer<mtmd_context> ctx);
-typedef _mtmd_get_audio_sample_rate_dart
-    = int Function(Pointer<mtmd_context> ctx);
-
-typedef _mtmd_bitmap_init_from_audio_native
-    = Pointer<mtmd_bitmap> Function(IntPtr nSamples, Pointer<Float> data);
-typedef _mtmd_bitmap_init_from_audio_dart
-    = Pointer<mtmd_bitmap> Function(int nSamples, Pointer<Float> data);
-
-typedef _mtmd_bitmap_free_native
-    = Void Function(Pointer<mtmd_bitmap> bitmap);
-typedef _mtmd_bitmap_free_dart
-    = void Function(Pointer<mtmd_bitmap> bitmap);
-
-typedef _mtmd_input_chunks_init_native
-    = Pointer<mtmd_input_chunks> Function();
-typedef _mtmd_input_chunks_init_dart
-    = Pointer<mtmd_input_chunks> Function();
-
-typedef _mtmd_input_chunks_free_native
-    = Void Function(Pointer<mtmd_input_chunks> chunks);
-typedef _mtmd_input_chunks_free_dart
-    = void Function(Pointer<mtmd_input_chunks> chunks);
-
-typedef _mtmd_input_chunks_size_native
-    = IntPtr Function(Pointer<mtmd_input_chunks> chunks);
-typedef _mtmd_input_chunks_size_dart
-    = int Function(Pointer<mtmd_input_chunks> chunks);
-
-typedef _mtmd_tokenize_native = Int32 Function(
-    Pointer<mtmd_context> ctx,
-    Pointer<mtmd_input_chunks> output,
-    Pointer<mtmd_input_text> text,
-    Pointer<Pointer<mtmd_bitmap>> bitmaps,
-    IntPtr nBitmaps);
-typedef _mtmd_tokenize_dart = int Function(
-    Pointer<mtmd_context> ctx,
-    Pointer<mtmd_input_chunks> output,
-    Pointer<mtmd_input_text> text,
-    Pointer<Pointer<mtmd_bitmap>> bitmaps,
-    int nBitmaps);
-
-// --- mtmd-helper ---
-
-typedef _mtmd_helper_eval_chunks_native = Int32 Function(
-    Pointer<mtmd_context> ctx,
-    Pointer<llama_context> lctx,
-    Pointer<mtmd_input_chunks> chunks,
-    Int32 nPast,
-    Int32 seqId,
-    Int32 nBatch,
-    Bool logitsLast,
-    Pointer<Int32> newNPast);
-typedef _mtmd_helper_eval_chunks_dart = int Function(
-    Pointer<mtmd_context> ctx,
-    Pointer<llama_context> lctx,
-    Pointer<mtmd_input_chunks> chunks,
-    int nPast,
-    int seqId,
-    int nBatch,
-    bool logitsLast,
-    Pointer<Int32> newNPast);
-
-typedef _mtmd_helper_get_n_tokens_native
-    = IntPtr Function(Pointer<mtmd_input_chunks> chunks);
-typedef _mtmd_helper_get_n_tokens_dart
-    = int Function(Pointer<mtmd_input_chunks> chunks);
-
 // ============================================================================
 // 6. LlamaCppFfi —— DynamicLibrary 加载 + 函数绑定
 // ============================================================================
 
-/// llama.cpp + mtmd C API 的 Dart FFI 绑定。
+/// llama.cpp C API 的 Dart FFI 绑定（仅文本 LLM 推理）。
 ///
-/// 加载 jniLibs 中的 libllama.so 和 libmtmd.so，查找所有需要的 C 函数。
+/// 加载 jniLibs 中的 libllama.so，查找所有需要的 C 函数。
 /// 使用方式：
 /// ```dart
 /// final ffi = LlamaCppFfi();
 /// ffi.llamaBackendInit();
 /// ```
 class LlamaCppFfi {
-  LlamaCppFfi._(this._llamaLib, this._mtmdLib);
+  LlamaCppFfi._(this._llamaLib);
 
   static LlamaCppFfi? _instance;
 
@@ -733,7 +541,6 @@ class LlamaCppFfi {
   }
 
   final DynamicLibrary _llamaLib;
-  final DynamicLibrary _mtmdLib;
 
   static LlamaCppFfi _load() {
     if (!Platform.isAndroid && !Platform.isLinux && !Platform.isWindows && !Platform.isMacOS) {
@@ -746,11 +553,10 @@ class LlamaCppFfi {
     // DynamicLibrary.open 在应用 nativeLibraryDir 中查找。
     // dlopen 会自动加载 NEEDED 依赖，但显式加载可确保顺序 + 获取句柄。
     DynamicLibrary llamaLib;
-    DynamicLibrary mtmdLib;
 
     if (Platform.isAndroid) {
-      // Android：先加载底层 ggml 库（避免依赖查找失败），再加载 libllama.so 和 libmtmd.so
-      // 依赖链：libmtmd.so → libllama.so → libggml.so → libggml-cpu.so → libggml-base.so
+      // Android：先加载底层 ggml 库（避免依赖查找失败），再加载 libllama.so
+      // 依赖链：libllama.so → libggml.so → libggml-cpu.so → libggml-base.so
       try {
         DynamicLibrary.open('libggml-base.so');
         DynamicLibrary.open('libggml-cpu.so');
@@ -759,20 +565,16 @@ class LlamaCppFfi {
         // 底层库可能已被自动加载，忽略错误
       }
       llamaLib = DynamicLibrary.open('libllama.so');
-      mtmdLib = DynamicLibrary.open('libmtmd.so');
     } else if (Platform.isLinux) {
       llamaLib = DynamicLibrary.open('libllama.so');
-      mtmdLib = DynamicLibrary.open('libmtmd.so');
     } else if (Platform.isWindows) {
       llamaLib = DynamicLibrary.open('llama.dll');
-      mtmdLib = DynamicLibrary.open('mtmd.dll');
     } else {
       // macOS
       llamaLib = DynamicLibrary.open('libllama.dylib');
-      mtmdLib = DynamicLibrary.open('libmtmd.dylib');
     }
 
-    return LlamaCppFfi._(llamaLib, mtmdLib);
+    return LlamaCppFfi._(llamaLib);
   }
 
   // --- llama backend ---
@@ -935,77 +737,4 @@ class LlamaCppFfi {
   late final int Function(Pointer<llama_sampler>, Pointer<llama_context>, int)
       llamaSamplerSample = _llamaLib.lookupFunction<_llama_sampler_sample_native,
               _llama_sampler_sample_dart>('llama_sampler_sample');
-
-  // --- mtmd ---
-
-  late final Pointer<Utf8> Function() mtmdDefaultMarker = _mtmdLib
-      .lookupFunction<_mtmd_default_marker_native, _mtmd_default_marker_dart>(
-          'mtmd_default_marker');
-
-  late final mtmd_context_params Function() mtmdContextParamsDefault =
-      _mtmdLib.lookupFunction<_mtmd_context_params_default_native,
-              _mtmd_context_params_default_dart>(
-          'mtmd_context_params_default');
-
-  late final Pointer<mtmd_context> Function(
-          Pointer<Utf8>, Pointer<llama_model>, mtmd_context_params)
-      mtmdInitFromFile = _mtmdLib.lookupFunction<_mtmd_init_from_file_native,
-              _mtmd_init_from_file_dart>('mtmd_init_from_file');
-
-  late final void Function(Pointer<mtmd_context>) mtmdFree = _mtmdLib
-      .lookupFunction<_mtmd_free_native, _mtmd_free_dart>('mtmd_free');
-
-  late final bool Function(Pointer<mtmd_context>) mtmdSupportAudio = _mtmdLib
-      .lookupFunction<_mtmd_support_audio_native, _mtmd_support_audio_dart>(
-          'mtmd_support_audio');
-
-  late final int Function(Pointer<mtmd_context>) mtmdGetAudioSampleRate =
-      _mtmdLib.lookupFunction<_mtmd_get_audio_sample_rate_native,
-              _mtmd_get_audio_sample_rate_dart>('mtmd_get_audio_sample_rate');
-
-  late final Pointer<mtmd_bitmap> Function(int, Pointer<Float>)
-      mtmdBitmapInitFromAudio = _mtmdLib.lookupFunction<
-              _mtmd_bitmap_init_from_audio_native,
-              _mtmd_bitmap_init_from_audio_dart>(
-          'mtmd_bitmap_init_from_audio');
-
-  late final void Function(Pointer<mtmd_bitmap>) mtmdBitmapFree = _mtmdLib
-      .lookupFunction<_mtmd_bitmap_free_native, _mtmd_bitmap_free_dart>(
-          'mtmd_bitmap_free');
-
-  late final Pointer<mtmd_input_chunks> Function() mtmdInputChunksInit =
-      _mtmdLib.lookupFunction<_mtmd_input_chunks_init_native,
-              _mtmd_input_chunks_init_dart>('mtmd_input_chunks_init');
-
-  late final void Function(Pointer<mtmd_input_chunks>) mtmdInputChunksFree =
-      _mtmdLib.lookupFunction<_mtmd_input_chunks_free_native,
-              _mtmd_input_chunks_free_dart>('mtmd_input_chunks_free');
-
-  late final int Function(Pointer<mtmd_input_chunks>) mtmdInputChunksSize =
-      _mtmdLib.lookupFunction<_mtmd_input_chunks_size_native,
-              _mtmd_input_chunks_size_dart>('mtmd_input_chunks_size');
-
-  late final int Function(Pointer<mtmd_context>, Pointer<mtmd_input_chunks>,
-          Pointer<mtmd_input_text>, Pointer<Pointer<mtmd_bitmap>>, int)
-      mtmdTokenize = _mtmdLib.lookupFunction<_mtmd_tokenize_native,
-              _mtmd_tokenize_dart>('mtmd_tokenize');
-
-  // --- mtmd-helper ---
-
-  late final int Function(
-          Pointer<mtmd_context>,
-          Pointer<llama_context>,
-          Pointer<mtmd_input_chunks>,
-          int,
-          int,
-          int,
-          bool,
-          Pointer<Int32>)
-      mtmdHelperEvalChunks = _mtmdLib.lookupFunction<
-              _mtmd_helper_eval_chunks_native, _mtmd_helper_eval_chunks_dart>(
-          'mtmd_helper_eval_chunks');
-
-  late final int Function(Pointer<mtmd_input_chunks>) mtmdHelperGetNTokens =
-      _mtmdLib.lookupFunction<_mtmd_helper_get_n_tokens_native,
-              _mtmd_helper_get_n_tokens_dart>('mtmd_helper_get_n_tokens');
 }

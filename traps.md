@@ -384,3 +384,10 @@
 - **现象**: `flutter analyze` 报 `error - The named parameter 'enableThinking' isn't defined - lib\presentation\settings\settings_screen.dart:524:9 - undefined_named_parameter`
 - **根因**: `_testLocalLlmLoad` 方法中创建 `LlmConfig(engineType:, modelName:, temperature:, maxTokens:, enableThinking: false)`，但 `LlmConfig` 类（`lib/services/llm/llm_engine.dart:30-56`）的构造函数仅接受 `engineType`/`providerName`/`modelName`/`customUrl`/`maxTokens`/`temperature` 六个参数，**无 `enableThinking` 字段**。`enableThinking` 是 `LocalLlmEngine.generate()` 和 `CloudLlmEngine.generate()` 的方法参数（`bool enableThinking = false`），不属于配置对象。`_testLocalLlmLoad` 仅测试模型加载（init → modelDesc → dispose，不调用 generate），`enableThinking` 在此处无意义
 - **解决**: 移除 `LlmConfig(...)` 构造调用中的 `enableThinking: false` 行。规律：`LlmConfig` 是数据类（仅持久化引擎+模型+采样参数），`enableThinking` 是运行时行为参数（属 generate 方法），二者不可混用。新增调用 `LlmConfig` 时以源码构造函数签名为准
+
+---
+
+## #49 模块删除后状态字段仅赋值无读取 — unused_field warning
+- **现象**: v0.9.9 砍掉 whisper.cpp + llama.cpp ASR 后，`flutter analyze` 报 `warning - The value of the field '_asrLocalEnginePref' isn't used - lib\presentation\settings\asr_settings_screen.dart - unused_field`
+- **根因**: 子代理清理 `asr_settings_screen.dart` 时删除了 `_buildLocalAsrEnginePref` 引擎偏好下拉框（该下拉框是 `_asrLocalEnginePref` 的唯一读取方），但保留了 `_asrLocalEnginePref` 字段声明 + `_loadAsrData` 中的 `prefs.getString('asr_local_engine_pref')` 读取和 setState 赋值。字段变为"仅写不读"，Dart analyzer 标记 unused_field warning
+- **解决**: 删除 `_asrLocalEnginePref` 字段声明 + `_loadAsrData` 中 `asrEnginePref` 变量读取和 `setState` 赋值。规律：删除一个 UI 组件后，必须检查其绑定的状态字段是否还有其他读取方；若该字段仅被已删除的组件消费，需同步删除字段声明及所有赋值点，否则产生 unused_field warning。子代理批量删除 UI 逻辑时尤其要注意这种"字段残留"问题
